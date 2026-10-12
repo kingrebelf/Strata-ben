@@ -6,4 +6,4 @@ set -u
 cd "$STRATA_DIR" || exit 1
 nohup "$STRATA_PYTHON" "$STRATA_DIR/serve/server.py" --engine strata --config "$STRATA_CONFIG" \
 	--host 127.0.0.1 --port "$STRATA_PORT" >> "$STRATA_DIR/strata-server.out" 2>&1 < /dev/null &
-echo "Strata starting (pid $!) on 127.0.0.1:$STRATA_PORT ... a cold start takes a minute or two."
+echo "Strata starting (pid $!) on 127.0.0.1:$STRATA_PORT ... loading (a few minutes when the model is not in the RAM cache)."

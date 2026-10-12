@@ -95,6 +95,37 @@ def llama_json(st, method, path, body=None, timeout=900):
     return json.loads(data)
 
 
+def reasoning_defaults(st, body):
+    """Thinking control for /v1/chat/completions on a llama-server model.
+
+    - The client turned thinking off (chat_template_kwargs.enable_thinking=false or reasoning_effort="none"): also
+      send reasoning_budget_tokens=0, because some templates (GLM-5.3) always open a think block and ignore
+      enable_thinking, so the hidden thinking would otherwise eat the visible answer.
+    - The client said nothing about thinking: apply the model's defaults from active.json ("chat_defaults", e.g.
+      {"reasoning_effort": "low", "reasoning_budget_tokens": 2048}).
+    - Anything the client set is kept.  The thinking itself comes back in message.reasoning_content.
+    """
+    try:
+        req = json.loads(body or b"{}")
+    except ValueError:
+        return body
+    if not isinstance(req, dict):
+        return body
+    kw = req.get("chat_template_kwargs") or {}
+    budget_keys = ("reasoning_budget_tokens", "thinking_budget_tokens")
+    off = kw.get("enable_thinking") is False or kw.get("thinking") is False or req.get("reasoning_effort") == "none"
+    said = off or "reasoning_effort" in req or any(k in req for k in budget_keys) or \
+        "enable_thinking" in kw or "thinking" in kw
+    if off and not any(k in req for k in budget_keys):
+        req["reasoning_budget_tokens"] = 0
+    elif not said:
+        for k, v in (st.get("chat_defaults") or {}).items():
+            req.setdefault(k, v)
+    else:
+        return body
+    return json.dumps(req).encode()
+
+
 INDICATOR_JS = r"""
 (function () {
   function put(m) {
@@ -247,6 +278,7 @@ class Handler(BaseHTTPRequestHandler):
                     {"role": "user", "content": systemone.build_prompt(state, questions)}]
         payload = {"messages": messages, "stream": False, "max_tokens": 4096,
                    "chat_template_kwargs": {"enable_thinking": False, "thinking": False},
+                   "reasoning_budget_tokens": 0,   # no thinking before the JSON (templates that always think: GLM)
                    "response_format": {"type": "json_schema", "json_schema": {
                        "name": "systemone", "strict": True, "schema": systemone.build_schema(questions)}}}
         for k in ("temperature", "top_p", "seed"):
@@ -297,6 +329,8 @@ class Handler(BaseHTTPRequestHandler):
                                     "dialects": DIALECTS, "healthy": backend_healthy(st)})
         if path in ("/v1/decide", "/v1/systemone") and self.command == "POST":
             return self._decide(st, body)
+        if path == "/v1/chat/completions" and self.command == "POST":
+            body = reasoning_defaults(st, body)
         return self._proxy(st, body)
 
     def do_GET(self):

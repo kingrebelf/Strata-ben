@@ -34,20 +34,27 @@ listening() { ss -ltn 2>/dev/null | grep -q ":$1 "; }
 
 # model-switch.py on the public port: started once, it stays up between model switches
 ensure_switch() {
-	if [ -s "$STATE/switch.pid" ] && kill -0 "$(cat "$STATE/switch.pid")" 2>/dev/null; then return 0; fi
+	local ver; ver=$(md5sum "$LAUNCH/model-switch.py" | cut -d' ' -f1)
+	if [ -s "$STATE/switch.pid" ] && kill -0 "$(cat "$STATE/switch.pid")" 2>/dev/null; then
+		[ "$(cat "$STATE/switch.version" 2>/dev/null)" = "$ver" ] && return 0
+		echo "Restarting the model switch (model-switch.py was updated) ..."   # called between models: nothing in flight
+		kill "$(cat "$STATE/switch.pid")"
+		for i in $(seq 1 20); do listening "$PORT" || break; sleep 0.5; done
+	fi
 	if listening "$PORT"; then
 		echo "Port $PORT is taken by something else (not the model switch):"; ss -ltnp | grep ":$PORT "; return 1
 	fi
 	nohup "$STRATA_PYTHON" -I "$LAUNCH/model-switch.py" --port "$PORT" --state "$STATE/active.json" \
 		--strata-dir "$STRATA_DIR" --strata-config "$STRATA_CONFIG" >> "$STATE/model-switch.log" 2>&1 < /dev/null &
 	echo $! > "$STATE/switch.pid"
+	echo "$ver" > "$STATE/switch.version"
 	for i in $(seq 1 20); do listening "$PORT" && return 0; sleep 0.5; done
 	echo "The model switch did not start; see $STATE/model-switch.log"; return 1
 }
 
-set_active() {   # set_active <name> <label> <strata|llama> <url>
-	printf '{"name": "%s", "label": "%s", "backend": "%s", "url": "%s", "since": %s}\n' \
-		"$1" "$2" "$3" "$4" "$(date +%s)" > "$STATE/active.json.tmp"
+set_active() {   # set_active <name> <label> <strata|llama> <url> [chat-defaults JSON object]
+	printf '{"name": "%s", "label": "%s", "backend": "%s", "url": "%s", "since": %s, "chat_defaults": %s}\n' \
+		"$1" "$2" "$3" "$4" "$(date +%s)" "${5:-{\}}" > "$STATE/active.json.tmp"
 	mv "$STATE/active.json.tmp" "$STATE/active.json"
 }
 
@@ -94,20 +101,27 @@ wait_health() {   # wait_health <port> <seconds> [pid]
 	return 1
 }
 
-# start_llama <llama-server> <name> <label> <model.gguf> <ctx> [extra llama-server args...]
+SWITCH_NOTE="Switching models takes a few minutes: the new model is read from disk (the previous one pushed it out of
+the RAM cache), and requests to port $PORT answer 'not reachable yet' until it is ready."
+
+# start_llama <llama-server> <name> <label> <model.gguf> <ctx> <chat-defaults JSON> [extra llama-server args...]
+# Thinking goes to message.reasoning_content (--reasoning-format deepseek); chat-defaults apply to chat requests that
+# say nothing about thinking (model-switch.py).
 start_llama() {
-	local llama=$1 name=$2 label=$3 model=$4 ctx=$5; shift 5
+	local llama=$1 name=$2 label=$3 model=$4 ctx=$5 defaults=$6; shift 6
 	[ -x "$llama" ] || { echo "llama-server not found: $llama"; return 1; }
 	[ -s "$model" ] || { echo "Model not found: $model"; return 1; }
 	stop_all || return 1
 	ensure_switch || return 1
 	listening "$LLAMA_PORT" && { echo "Port $LLAMA_PORT is in use:"; ss -ltnp | grep ":$LLAMA_PORT "; return 1; }
-	echo "Starting $label (a cold load can take ~10 min) ..."
+	echo "Starting $label ..."
+	echo "$SWITCH_NOTE"
 	CUDA_VISIBLE_DEVICES=$CUDA_DEVICES nohup "$llama" -m "$model" -ngl 999 -c "$ctx" --host 127.0.0.1 \
-		--port "$LLAMA_PORT" --jinja -np 1 --no-webui --alias "$name" "$@" >> "$STATE/$name.log" 2>&1 < /dev/null &
+		--port "$LLAMA_PORT" --jinja -np 1 --no-webui --alias "$name" --reasoning-format deepseek "$@" \
+		>> "$STATE/$name.log" 2>&1 < /dev/null &
 	local pid=$!
 	echo "$pid" > "$STATE/llama-server.pid"
-	set_active "$name" "$label" llama "http://127.0.0.1:$LLAMA_PORT"
+	set_active "$name" "$label" llama "http://127.0.0.1:$LLAMA_PORT" "$defaults"
 	if wait_health "$LLAMA_PORT" 900 "$pid"; then
 		echo "Ready: http://$PUBLIC_HOST:$PORT/v1  (running model: $label; same API key as Strata)"
 	else

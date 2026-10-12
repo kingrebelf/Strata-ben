@@ -79,7 +79,15 @@ clients ──> :8080  model-switch.py  ──>  Qwen3.8      Strata serve/serve
   "healthy"}`. Strata's web UI shows a **Running model** line in the Monitor tab (added by the switch as the page passes
   through, so Strata's own files are not changed). While a llama.cpp model runs, `/` shows a small status page.
 - **One model at a time**: each launcher stops the running model, waits until the GPUs are free, then starts its
-  model. `stop-all-models.sh` stops everything; the switch stays up and reports "no model running".
+  model. `stop-all-models.sh` stops everything; the switch stays up and reports "no model running". A switch takes a
+  few minutes when the new model has to be read from disk (the previous one pushed it out of the RAM cache).
+- **Thinking on the llama.cpp models**: the thinking comes back in `message.reasoning_content`, the answer in
+  `message.content`. GLM-5.3's template always thinks first, so a chat request that says nothing about thinking gets
+  low effort with a 2048-token thinking budget (`GLM_CHAT_DEFAULTS` changes this). Ask for none with
+  `"reasoning_effort": "none"` or `"chat_template_kwargs": {"enable_thinking": false}` (the switch then also sends a
+  zero thinking budget), or for more with `"reasoning_effort": "high"` / `"reasoning_budget_tokens": N`. DeepSeek V4
+  Flash answers without thinking unless asked (`"chat_template_kwargs": {"thinking": true}`). The Decisions API never
+  thinks first.
 
 ### Setup
 
