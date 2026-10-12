@@ -121,7 +121,7 @@ launcher directory owned by the model user and not writable by the other account
 | --- | --- | --- |
 | Qwen3.8-Flash-Next IQ3_S | Strata (4 GPUs, layer split) | the default |
 | DeepSeek V4 Flash 0731 UD-Q2_K_XL | llama.cpp, all 4 GPUs | ~22.5 tok/s decode, ~139 tok/s prompt (4K), ~25-27 GB per card at 16K context |
-| GLM-5.3 Flash UD-Q2_K_XL | llama.cpp (2026-10-07+), all 4 GPUs | ~101 GiB of weights; start with a 16K context (not benchmarked yet) |
+| GLM-5.3 Flash UD-Q2_K_XL | llama.cpp (2026-10-07+), all 4 GPUs, `-ub 1024` | ~26 tok/s writing, ~190 tok/s prompt reading (4K), ~27-31 GB per card at 16K context; optional MTP draft: ~35 tok/s on summaries, slower on creative text |
 
 ## Credits and licenses
 

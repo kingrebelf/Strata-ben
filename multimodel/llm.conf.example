@@ -29,3 +29,8 @@ DS4_CTX=16384
 GLM_LLAMA=$HOME/llama.cpp/build/bin/llama-server
 GLM_MODEL=$HOME/models/GLM-5.3-Flash/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf
 GLM_CTX=16384
+# Prompt batch size (1024: ~19% faster prompt reading than llama.cpp's 512 on 4x V100; 2048 fills 32 GB cards).
+GLM_UBATCH=1024
+# 1 = MTP draft head (faster writing on predictable text, slower on creative text; see start-glm53.sh).
+GLM_MTP=0
+GLM_MTP_DEVICE=CUDA0
