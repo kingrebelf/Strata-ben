@@ -45,6 +45,11 @@ sys.path.insert(0, A.strata_dir)
 from serve import systemone                       # noqa: E402  the Decisions API module, used as-is
 from serve.structured import StructuredOutputError  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import llama_ui                                     # noqa: E402  Strata's web page for the llama.cpp models
+
+UI = llama_ui.LlamaUI(A.strata_dir, os.path.dirname(os.path.abspath(A.state)))
+
 
 def load_keys():
     try:
@@ -95,9 +100,12 @@ def llama_json(st, method, path, body=None, timeout=900):
     return json.loads(data)
 
 
-def reasoning_defaults(st, body):
+def reasoning_defaults(st, body, shared=None):
     """Thinking control for /v1/chat/completions on a llama-server model.
 
+    - Settings saved with "Use for other apps too" in the web page (`shared`) fill in what the request leaves out.
+    - The model's "_effort_map" (chat_defaults in active.json) renames effort levels its template does not know
+      (GLM-5.3 knows low / high / max: "medium" -> "high").
     - The client turned thinking off (chat_template_kwargs.enable_thinking=false or reasoning_effort="none"): also
       send reasoning_budget_tokens=0, because some templates (GLM-5.3) always open a think block and ignore
       enable_thinking, so the hidden thinking would otherwise eat the visible answer.
@@ -111,6 +119,12 @@ def reasoning_defaults(st, body):
         return body
     if not isinstance(req, dict):
         return body
+    defaults = st.get("chat_defaults") or {}
+    for k, v in (shared or {}).items():
+        req.setdefault(k, v)
+    emap = defaults.get("_effort_map") or {}
+    if req.get("reasoning_effort") in emap:
+        req["reasoning_effort"] = emap[req["reasoning_effort"]]
     kw = req.get("chat_template_kwargs") or {}
     budget_keys = ("reasoning_budget_tokens", "thinking_budget_tokens")
     off = kw.get("enable_thinking") is False or kw.get("thinking") is False or req.get("reasoning_effort") == "none"
@@ -119,11 +133,54 @@ def reasoning_defaults(st, body):
     if off and not any(k in req for k in budget_keys):
         req["reasoning_budget_tokens"] = 0
     elif not said:
-        for k, v in (st.get("chat_defaults") or {}).items():
-            req.setdefault(k, v)
-    else:
-        return body
+        for k, v in defaults.items():
+            if not k.startswith("_"):
+                req.setdefault(k, v)
     return json.dumps(req).encode()
+
+
+class ChatWatcher:
+    """Follows a /v1/chat/completions answer on its way through (streamed or not) for the web page's Monitor."""
+
+    def __init__(self):
+        self.started = time.time()
+        self.buf = b""
+        self.chunks = 0
+        self.timings = None
+        self.finish = None
+        UI.req.begin()
+
+    def feed(self, data):
+        self.buf += data
+        while b"\n" in self.buf:
+            line, self.buf = self.buf.split(b"\n", 1)
+            self._line(line.strip())
+
+    def _line(self, line):
+        if line.startswith(b"data:"):
+            line = line[5:].strip()
+        if not line.startswith(b"{"):
+            return
+        try:
+            j = json.loads(line)
+        except ValueError:
+            return
+        ch = (j.get("choices") or [{}])[0]
+        if ch.get("delta") is not None:
+            self.chunks += 1
+            if self.chunks % 8 == 0:
+                UI.req.progress(self.chunks)
+        if ch.get("finish_reason"):
+            self.finish = ch["finish_reason"]
+        if j.get("timings"):
+            self.timings = j["timings"]
+
+    def close(self):
+        if self.buf:
+            self._line(self.buf.strip())
+        t = self.timings or {}
+        UI.tel.note_speed(t.get("predicted_per_second"), t.get("prompt_per_second"))
+        UI.req.end(self.timings, self.finish, self.started)
 
 
 INDICATOR_JS = r"""
@@ -163,7 +220,7 @@ code{{background:#eee;padding:1px 5px;border-radius:4px}}</style></head><body><d
 <tr><td>Status</td><td>{state}</td></tr><tr><td>Engine</td><td>{html.escape((st or {}).get("backend", "-"))}</td></tr>
 <tr><td>Since</td><td>{since}</td></tr>
 <tr><td>API</td><td><code>/v1/chat/completions</code>, <code>/v1/messages</code>, <code>/v1/decide</code>, <code>/v1/systemone</code></td></tr>
-</table><p>The Strata chat and monitor pages are available while Qwen3.8 (Strata) is the running model.</p>
+</table><p>The chat and monitor page opens here once a model is running (start one with a launcher).</p>
 </div></body></html>"""
 
 
@@ -210,10 +267,10 @@ class Handler(BaseHTTPRequestHandler):
             got = auth[7:].strip()
         return any(hmac.compare_digest(got.encode(), k.encode()) for k in KEYS)
 
-    def _proxy(self, st, body, inject=False):
+    def _proxy(self, st, body, inject=False, watch=None):
         u = urlsplit(st["url"])
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
-        if inject:
+        if inject or watch:
             headers.pop("Accept-Encoding", None)
         headers["Content-Length"] = str(len(body))
         try:
@@ -221,6 +278,8 @@ class Handler(BaseHTTPRequestHandler):
             c.request(self.command, self.path, body=body if body else None, headers=headers)
             r = c.getresponse()
         except Exception as e:
+            if watch:
+                watch.close()
             return self._error(503, "server_error", f"the model ({st.get('label') or st.get('name')}) is not reachable "
                                                    f"yet - it may still be starting: {e}")
         ctype = r.getheader("Content-Type", "")
@@ -251,6 +310,8 @@ class Handler(BaseHTTPRequestHandler):
                 chunk = r.read1(65536) if hasattr(r, "read1") else r.read(65536)
                 if not chunk:
                     break
+                if watch:
+                    watch.feed(chunk)
                 if length is None:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 else:
@@ -262,6 +323,8 @@ class Handler(BaseHTTPRequestHandler):
             pass
         finally:
             c.close()
+            if watch:
+                watch.close()
 
     # ------------------------------------------------------------------ the Decisions API on a llama-server model
     def _decide(self, st, body):
@@ -316,21 +379,48 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, status_page(None, False), "text/html; charset=utf-8")
             return self._error(503, "server_error", "no model is running; start one with a launcher")
         if st["backend"] == "strata":
+            UI.tel.stop()
             return self._proxy(st, body, inject=(self.command == "GET" and path in ("/", "/index.html")))
-        # llama-server backend
-        if self.command == "GET" and path in ("/", "/index.html", "/api-monitor"):
+        # llama-server backend: Strata's web page, served here, with its endpoints answered in Strata's shapes
+        if self.command == "GET" and (path in ("/", "/index.html") or path.startswith("/web/")):
+            page = UI.static(path)
+            if page is None:
+                if path.startswith("/web/"):
+                    return self._error(404, "not_found_error", "no such file")
+                return self._send(200, status_page(st, backend_healthy(st)), "text/html; charset=utf-8")
+            data, ctype = page
+            if ctype.startswith("text/html"):
+                data = data.replace(b"</body>", b"<script>" + INDICATOR_JS.encode() + b"</script></body>")
+            return self._send(200, data, ctype)
+        if self.command == "GET" and path == "/api-monitor":
             return self._send(200, status_page(st, backend_healthy(st)), "text/html; charset=utf-8")
         if path == "/health":
-            return self._proxy(st, body)
-        if path.startswith("/v1/") and not self._authorized():
+            return self._send(200, UI.health(st, backend_healthy(st), llama_json, bool(KEYS)))
+        ui_paths = ("/metrics", "/settings", "/config", "/mcp")
+        if (path.startswith("/v1/") or path in ui_paths) and not self._authorized():
             return self._error(401, "authentication_error", "a valid API key is required")
+        if path == "/metrics":
+            return self._send(200, UI.metrics(st, backend_healthy(st), llama_json, "requests=all" in self.path))
+        if path == "/settings":
+            if self.command == "POST":
+                try:
+                    defaults = (json.loads(body or b"{}") or {}).get("defaults")
+                except ValueError:
+                    return self._error(400, "invalid_request_error", "send a JSON object")
+                return self._send(200, UI.set_settings(st.get("name"), defaults))
+            return self._send(200, UI.get_settings(st.get("name")))
+        if path == "/mcp":
+            return self._send(200, {"servers": [], "tools": 0})
+        if path == "/config":   # Strata's run-config editor: not for llama.cpp models (the page hides the card)
+            return self._error(404, "not_found_error", "the run config belongs to the Strata model")
         if path == "/v1/status":
             return self._send(200, {"model": st.get("name"), "label": st.get("label"), "service": "llama.cpp",
                                     "dialects": DIALECTS, "healthy": backend_healthy(st)})
         if path in ("/v1/decide", "/v1/systemone") and self.command == "POST":
             return self._decide(st, body)
         if path == "/v1/chat/completions" and self.command == "POST":
-            body = reasoning_defaults(st, body)
+            body = reasoning_defaults(st, body, UI.shared_defaults(st.get("name")))
+            return self._proxy(st, body, watch=ChatWatcher())
         return self._proxy(st, body)
 
     def do_GET(self):

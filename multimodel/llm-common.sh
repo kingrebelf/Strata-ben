@@ -34,7 +34,7 @@ listening() { ss -ltn 2>/dev/null | grep -q ":$1 "; }
 
 # model-switch.py on the public port: started once, it stays up between model switches
 ensure_switch() {
-	local ver; ver=$(md5sum "$LAUNCH/model-switch.py" | cut -d' ' -f1)
+	local ver; ver=$(cat "$LAUNCH/model-switch.py" "$LAUNCH/llama_ui.py" | md5sum | cut -d' ' -f1)
 	if [ -s "$STATE/switch.pid" ] && kill -0 "$(cat "$STATE/switch.pid")" 2>/dev/null; then
 		[ "$(cat "$STATE/switch.version" 2>/dev/null)" = "$ver" ] && return 0
 		echo "Restarting the model switch (model-switch.py was updated) ..."   # called between models: nothing in flight

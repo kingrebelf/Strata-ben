@@ -8,7 +8,7 @@ DST=${1:-$HOME/llm-launchers}
 DESK=$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")
 
 mkdir -p "$DST"
-for f in llm-common.sh model-switch.py start-qwen38.sh start-deepseek-v4-flash.sh start-glm53.sh stop-all-models.sh \
+for f in llm-common.sh model-switch.py llama_ui.py start-qwen38.sh start-deepseek-v4-flash.sh start-glm53.sh stop-all-models.sh \
          strata-start.sh strata-stop.sh llm.conf.example; do
 	install -m 755 "$SRC/$f" "$DST/$f"
 done

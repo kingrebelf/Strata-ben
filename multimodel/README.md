@@ -5,6 +5,7 @@ See [../README-STRATA-BEN.md](../README-STRATA-BEN.md#one-server-several-models)
 | File | What it does |
 | --- | --- |
 | `model-switch.py` | The front on the public port. Forwards to the running model, answers `/v1/active-model`, runs the Decisions API for llama.cpp models, adds the "Running model" line to Strata's Monitor tab. |
+| `llama_ui.py` | Strata's web page for the llama.cpp models: serves `serve/web` and answers `/health`, `/metrics`, `/settings`, `/mcp` with nvidia-smi / `/proc` hardware numbers and the requests seen by the switch. |
 | `llm-common.sh` | Shared launcher code: settings from `llm.conf`, stop-before-start, GPU wait, health wait. |
 | `start-qwen38.sh` | Qwen3.8 on Strata (`strata-start.sh` runs Strata's server on 127.0.0.1:8181). |
 | `start-deepseek-v4-flash.sh`, `start-glm53.sh` | DeepSeek V4 Flash / GLM-5.3 on llama-server, 127.0.0.1:8182. |

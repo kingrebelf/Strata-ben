@@ -77,7 +77,12 @@ clients ──> :8080  model-switch.py  ──>  Qwen3.8      Strata serve/serve
   output, so answers come back in the same format.
 - **Which model is running**: `GET /v1/active-model` (no key needed) returns `{"name", "label", "backend", "since",
   "healthy"}`. Strata's web UI shows a **Running model** line in the Monitor tab (added by the switch as the page passes
-  through, so Strata's own files are not changed). While a llama.cpp model runs, `/` shows a small status page.
+  through, so Strata's own files are not changed).
+- **The same web page on every model**: while a llama.cpp model runs, the switch serves Strata's page (Chat, Monitor,
+  About) itself and answers the endpoints it reads (`/health`, `/metrics`, `/settings`, `/mcp`) in Strata's shapes:
+  chat with the thinking shown separately, the model state, decode and prefill speed, per-GPU load / memory /
+  temperature / power, CPU, RAM, disk, the recent-requests table and totals. Strata-only panels (expert cache,
+  conversation cache, run-config editor) stay empty or hidden. When no model runs, `/` shows a small status page.
 - **One model at a time**: each launcher stops the running model, waits until the GPUs are free, then starts its
   model. `stop-all-models.sh` stops everything; the switch stays up and reports "no model running". A switch takes a
   few minutes when the new model has to be read from disk (the previous one pushed it out of the RAM cache).
