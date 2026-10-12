@@ -2,6 +2,13 @@
 # Switch to Qwen3.8-Flash-Next on Strata (Strata's server, behind the model switch on 127.0.0.1:$STRATA_PORT).
 . "$(dirname "$(readlink -f "$0")")/llm-common.sh"
 
+# already running: keep it, only make sure the switch is up (and on its current code)
+if grep -q '"backend": "strata"' "$STATE/active.json" 2>/dev/null &&
+		curl -fsS -m 3 "http://127.0.0.1:$STRATA_PORT/health" >/dev/null 2>&1; then
+	ensure_switch || exit 1
+	echo "Qwen3.8 is already running: http://$PUBLIC_HOST:$PORT/v1"
+	exit 0
+fi
 stop_all || exit 1
 ensure_switch || exit 1
 if listening "$STRATA_PORT"; then   # another service there would answer for Strata: refuse, pick a free port in llm.conf

@@ -213,26 +213,159 @@ class ChatWatcher:
         UI.req.end(self.timings, self.finish, self.started)
 
 
+# ---------------------------------------------------------------------------- switching models from the web page
+# The models the page can switch to: name -> (label, launcher script next to this file).  Only scripts that exist
+# are offered.  A switch runs the same launcher as the Desktop shortcut (it stops the running model first).
+MODELS = {
+    "qwen3.8-flash-next": ("Qwen3.8 Flash Next (Strata)", "start-qwen38.sh"),
+    "deepseek-v4-flash": ("DeepSeek V4 Flash", "start-deepseek-v4-flash.sh"),
+    "glm-5.3-flash": ("GLM-5.3 Flash", "start-glm53.sh"),
+}
+LAUNCH_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+class Switcher:
+    def __init__(self):
+        self.proc = None
+        self.target = None
+        self.started = None
+        self.log = os.path.join(os.path.dirname(os.path.abspath(A.state)), "switch-from-page.log")
+        self.lock = threading.Lock()
+
+    def models(self):
+        return [{"name": n, "label": lab} for n, (lab, s) in MODELS.items() if os.path.isfile(os.path.join(LAUNCH_DIR, s))]
+
+    def status(self):
+        with self.lock:
+            running = self.proc is not None and self.proc.poll() is None
+            rc = None if self.proc is None or running else self.proc.returncode
+            tail = ""
+            if self.proc is not None:
+                try:
+                    with open(self.log, errors="replace") as f:
+                        tail = "".join(f.readlines()[-6:])
+                except OSError:
+                    pass
+            return {"switching": running, "target": self.target, "started": self.started, "exit_code": rc,
+                    "log": tail, "models": self.models()}
+
+    def start(self, name):
+        import subprocess
+        with self.lock:
+            if self.proc is not None and self.proc.poll() is None:
+                return 409, f"already switching to {self.target}"
+            if name not in MODELS or not os.path.isfile(os.path.join(LAUNCH_DIR, MODELS[name][1])):
+                return 400, "unknown model"
+            with open(self.log, "w") as log:
+                self.proc = subprocess.Popen(["bash", os.path.join(LAUNCH_DIR, MODELS[name][1])], stdout=log,
+                                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+            self.target, self.started = name, time.time()
+            return 202, f"switching to {MODELS[name][0]}"
+
+
+SWITCHER = Switcher()
+
 INDICATOR_JS = r"""
 (function () {
-  function put(m) {
+  // The Monitor tab's "Running model" line, with a model picker and a Switch button (model-switch.py).
+  var models = [], current = null;
+  function key() { try { return JSON.parse(localStorage.getItem('strata.apikey') || '""'); } catch (e) { return ''; } }
+  function hdrs(json) {
+    var h = {}, k = key();
+    if (k) h.Authorization = 'Bearer ' + k;
+    if (json) h['Content-Type'] = 'application/json';
+    return h;
+  }
+  function el(id) { return document.getElementById(id); }
+  function row() {
     var card = document.querySelector('#view-monitor .state-card');
-    if (!card) return;
-    var row = document.getElementById('running-model-row');
-    if (!row) {
-      row = document.createElement('div');
-      row.id = 'running-model-row';
-      row.className = 'state-card__row';
-      row.innerHTML = '<span>Running model: <b id="running-model-name"></b></span><span class="muted" id="running-model-since"></span>';
-      card.insertBefore(row, card.children[1] || null);
+    if (!card) return null;
+    var r = el('running-model-row');
+    if (!r) {
+      r = document.createElement('div');
+      r.id = 'running-model-row';
+      r.className = 'state-card__row';
+      r.style.flexWrap = 'wrap'; r.style.gap = '8px'; r.style.alignItems = 'center';
+      r.innerHTML = '<span>Running model: <b id="running-model-name"></b> <span class="muted" id="running-model-since"></span></span>' +
+        '<span id="model-switch-box" style="display:flex;gap:6px;align-items:center" hidden>' +
+        '<select id="model-switch-select" class="st-input" style="height:32px;padding:0 8px;width:auto"></select>' +
+        '<button id="model-switch-btn" class="st-btn st-btn--secondary" style="height:32px">Switch model</button></span>';
+      card.insertBefore(r, card.children[1] || null);
+      el('model-switch-btn').onclick = switchModel;
     }
-    document.getElementById('running-model-name').textContent = m.label || m.name || 'none';
-    document.getElementById('running-model-since').textContent = m.since ? 'since ' + new Date(m.since * 1000).toLocaleString() : '';
+    return r;
+  }
+  function put(m) {
+    if (!row()) return;
+    current = m.name;
+    el('running-model-name').textContent = m.label || m.name || 'none';
+    el('running-model-since').textContent = m.since ? '· since ' + new Date(m.since * 1000).toLocaleString() : '';
+    var sel = el('model-switch-select');
+    if (models.length && !sel.options.length) {
+      models.forEach(function (x) { var o = document.createElement('option'); o.value = x.name; o.textContent = x.label; sel.appendChild(o); });
+    }
+    for (var i = 0; i < sel.options.length; i++) sel.options[i].disabled = sel.options[i].value === current;
+    if (sel.value === current || !sel.value) {
+      for (var j = 0; j < sel.options.length; j++) if (!sel.options[j].disabled) { sel.selectedIndex = j; break; }
+    }
+    el('model-switch-box').hidden = !models.length;
+  }
+  function overlay(text, sub, err) {
+    var o = el('model-switch-overlay');
+    if (!o) {
+      o = document.createElement('div');
+      o.id = 'model-switch-overlay';
+      o.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;' +
+        'background:rgba(0,0,0,.55);padding:16px';
+      o.innerHTML = '<div class="st-card" style="max-width:520px;width:100%;padding:22px 24px">' +
+        '<div class="card-title" id="ms-title"></div><p id="ms-sub" class="muted" style="margin:.6rem 0 0"></p>' +
+        '<pre id="ms-err" style="white-space:pre-wrap;font-size:12px;margin-top:10px" hidden></pre>' +
+        '<button id="ms-close" class="st-btn st-btn--secondary" style="margin-top:12px" hidden>Close</button></div>';
+      document.body.appendChild(o);
+      el('ms-close').onclick = function () { o.remove(); };
+    }
+    el('ms-title').textContent = text;
+    el('ms-sub').textContent = sub || '';
+    el('ms-err').hidden = !err; el('ms-err').textContent = err || '';
+    el('ms-close').hidden = !err;
+  }
+  function switchModel() {
+    var target = el('model-switch-select').value;
+    var label = el('model-switch-select').selectedOptions[0].textContent;
+    if (!target || target === current) return;
+    if (!confirm('Switch to ' + label + '?\n\nThe running model stops first. Switching takes a few minutes ' +
+                 '(the new model is read from disk); chats and API calls wait until it is ready.')) return;
+    fetch('/v1/switch-model', {method: 'POST', headers: hdrs(true), body: JSON.stringify({model: target})})
+      .then(function (r) { return r.json().then(function (b) { return [r.status, b]; }); })
+      .then(function (x) {
+        if (x[0] === 401) { overlay('API key needed', '', 'Add the API key under About > Settings first.'); return; }
+        if (x[0] !== 202) { overlay('Could not switch', '', (x[1].error && x[1].error.message) || ('HTTP ' + x[0])); return; }
+        wait(target, label, Date.now());
+      })
+      .catch(function (e) { overlay('Could not switch', '', String(e)); });
+  }
+  function wait(target, label, t0) {
+    var secs = Math.round((Date.now() - t0) / 1000);
+    overlay('Switching to ' + label + ' ...', secs + ' s - this page reloads by itself when the model is ready.');
+    Promise.all([
+      fetch('/v1/active-model', {cache: 'no-store'}).then(function (r) { return r.json(); }).catch(function () { return {}; }),
+      fetch('/v1/switch-model', {cache: 'no-store', headers: hdrs()}).then(function (r) { return r.json(); }).catch(function () { return {}; })
+    ]).then(function (x) {
+      var a = x[0] || {}, s = x[1] || {};
+      if (a.name === target && a.healthy) { overlay(label + ' is ready', 'Reloading ...'); setTimeout(function () { location.reload(); }, 800); return; }
+      if (s.target === target && s.switching === false && s.exit_code) {
+        overlay('Switching to ' + label + ' failed', '', s.log || ('exit code ' + s.exit_code)); return;
+      }
+      if (Date.now() - t0 > 20 * 60 * 1000) { overlay('Still not ready after 20 minutes', '', s.log || ''); return; }
+      setTimeout(function () { wait(target, label, t0); }, 3000);
+    });
   }
   function poll() {
     fetch('/v1/active-model', {cache: 'no-store'}).then(function (r) { return r.json(); }).then(put).catch(function () {});
   }
-  poll(); setInterval(poll, 10000);
+  fetch('/v1/switch-model', {cache: 'no-store', headers: hdrs()}).then(function (r) { return r.ok ? r.json() : {}; })
+    .then(function (s) { models = s.models || []; poll(); }).catch(poll);
+  setInterval(poll, 10000);
 })();
 """
 
@@ -409,6 +542,21 @@ class Handler(BaseHTTPRequestHandler):
                                         "since": None, "healthy": False})
             return self._send(200, {"name": st.get("name"), "label": st.get("label"), "backend": st["backend"],
                                     "since": st.get("since"), "healthy": backend_healthy(st)})
+        if path == "/v1/switch-model":   # the web page's model switcher (needs the API key)
+            if not self._authorized():
+                return self._error(401, "authentication_error", "a valid API key is required")
+            if self.command == "POST":
+                try:
+                    name = (json.loads(body or b"{}") or {}).get("model")
+                except (ValueError, AttributeError):
+                    return self._error(400, "invalid_request_error", "send {\"model\": NAME}")
+                if st and st.get("name") == name and backend_healthy(st):
+                    return self._error(409, "invalid_request_error", f"{name} is already running")
+                code, msg = SWITCHER.start(name)
+                if code != 202:
+                    return self._error(code, "invalid_request_error", msg)
+                return self._send(202, {"message": msg, "model": name})
+            return self._send(200, SWITCHER.status())
         if not st:
             if self.command == "GET" and path in ("/", "/index.html"):
                 return self._send(200, status_page(None, False), "text/html; charset=utf-8")

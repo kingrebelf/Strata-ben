@@ -83,6 +83,10 @@ clients ──> :8080  model-switch.py  ──>  Qwen3.8      Strata serve/serve
   chat with the thinking shown separately, the model state, decode and prefill speed, per-GPU load / memory /
   temperature / power, CPU, RAM, disk, the recent-requests table and totals. Strata-only panels (expert cache,
   conversation cache, run-config editor) stay empty or hidden. When no model runs, `/` shows a small status page.
+- **Switch from the web page**: the Monitor tab's Running model line has a model picker and a **Switch model** button
+  (`POST /v1/switch-model {"model": NAME}` with the API key; `GET` gives the models and the switch's progress). It
+  runs the same launcher as the Desktop shortcuts, shows the progress, and reloads the page when the new model is
+  ready.
 - **One model at a time**: each launcher stops the running model, waits until the GPUs are free, then starts its
   model. `stop-all-models.sh` stops everything; the switch stays up and reports "no model running". A switch takes a
   few minutes when the new model has to be read from disk (the previous one pushed it out of the RAM cache).
