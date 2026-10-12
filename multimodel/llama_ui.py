@@ -32,8 +32,7 @@ class Telemetry:
         self._lock = threading.Lock()
         self._run = False
         self._cpu = self._disk = None
-        self._tok_s = 0.0
-        self._prefill = 0.0
+        self.speeds = lambda: (0.0, 0.0)   # set by LlamaUI: the running request's decode / prefill tok/s
 
     def start(self):
         if not self._run:
@@ -42,9 +41,6 @@ class Telemetry:
 
     def stop(self):
         self._run = False
-
-    def note_speed(self, tok_s, prefill):
-        self._tok_s, self._prefill = tok_s or 0.0, prefill or 0.0
 
     def _loop(self):
         if not self.static:
@@ -132,7 +128,7 @@ class Telemetry:
             now["disk_read_mb"] = round((rd - self._disk[0]) / dt / 2 ** 20, 1)
             now["disk_write_mb"] = round((wr - self._disk[1]) / dt / 2 ** 20, 1)
         self._disk = (rd, wr, t)
-        now["tok_s"], now["prefill_tok_s_mean"] = self._tok_s, self._prefill
+        now["tok_s"], now["prefill_tok_s_mean"] = self.speeds()
         return now
 
 
@@ -148,17 +144,34 @@ class Requests:
         self._lock = threading.Lock()
         self._busy = 0
 
-    def begin(self, prompt_hint=None):
+    def begin(self, max_tokens=None):
         with self._lock:
             self._busy += 1
-            self.live = {"state": "reading", "queued": max(0, self._busy - 1), "prompt_tokens": prompt_hint,
+            self.live = {"state": "reading", "queued": max(0, self._busy - 1), "max_tokens": max_tokens,
                          "started": time.time()}
 
-    def progress(self, generated):
+    def reading(self, processed, total, prefill_tok_s):
         with self._lock:
-            if self.live.get("state") != "idle":
+            if self.live.get("state") == "reading":
+                self.live.update(prompt_read=processed, prompt_total=total, prompt_tokens=total,
+                                 prefill_tok_s_mean=prefill_tok_s)
+
+    def generating(self, generated, tok_s, prefill_tok_s):
+        with self._lock:
+            if self.live.get("state") in ("reading", "generating"):
                 self.live["state"] = "generating"
                 self.live["generated"] = generated
+                if tok_s:
+                    self.live["tok_s"] = tok_s
+                if prefill_tok_s:
+                    self.live["prefill_tok_s_mean"] = prefill_tok_s
+
+    def speeds(self):
+        """(decode tok/s, prefill tok/s) right now, for the sparklines: 0 when nothing runs."""
+        with self._lock:
+            s = self.live.get("state")
+            return (self.live.get("tok_s") or 0.0 if s == "generating" else 0.0,
+                    self.live.get("prefill_tok_s_mean") or 0.0 if s in ("reading", "generating") else 0.0)
 
     def end(self, timings, finish, started):
         with self._lock:
@@ -192,6 +205,7 @@ class LlamaUI:
         self.settings_file = os.path.join(state_dir, "ui-settings.json")
         self.tel = Telemetry()
         self.req = Requests()
+        self.tel.speeds = self.req.speeds
         self._props = {}
         self._props_for = None
 
@@ -236,10 +250,13 @@ class LlamaUI:
         engine = {"model": st.get("name"), "max_context": n_ctx, "context": n_ctx,
                   "images": bool((p.get("modalities") or {}).get("vision")),
                   "version": "llama.cpp " + str(p.get("build_info") or "").strip(), "kv": None, "cvec": 0}
+        started = live.get("started")
         live = {"state": live.get("state", "idle"), "queued": live.get("queued", 0), "phase": None,
-                "prompt_tokens": live.get("prompt_tokens"), "prompt_read": None, "prompt_total": None,
-                "generated": live.get("generated"), "max_tokens": None, "elapsed_s": None,
-                "tok_s": now.get("tok_s") or None, "tok_s_mean": None, "prefill_tok_s_mean": None}
+                "prompt_tokens": live.get("prompt_tokens"), "prompt_read": live.get("prompt_read"),
+                "prompt_total": live.get("prompt_total"), "generated": live.get("generated"),
+                "max_tokens": live.get("max_tokens"), "elapsed_s": time.time() - started if started else None,
+                "tok_s": live.get("tok_s"), "tok_s_mean": live.get("tok_s"),
+                "prefill_tok_s_mean": live.get("prefill_tok_s_mean")}
         return {"engine": engine, "live": live, "requests": rows, "requests_kept": kept, "totals": totals,
                 "conversation_cache": None, "hardware": now, "hardware_static": static, "history": hist,
                 "time": time.time()}

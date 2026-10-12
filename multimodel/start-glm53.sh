@@ -6,4 +6,4 @@
 . "$(dirname "$(readlink -f "$0")")/llm-common.sh"
 
 start_llama "$GLM_LLAMA" glm-5.3-flash "GLM-5.3 Flash" "$GLM_MODEL" "${GLM_CTX:-16384}" \
-	"${GLM_CHAT_DEFAULTS:-{\"reasoning_effort\": \"low\", \"reasoning_budget_tokens\": 2048, \"_effort_map\": {\"medium\": \"high\"\}\}}"
+	"${GLM_CHAT_DEFAULTS:-{\"reasoning_effort\": \"low\", \"reasoning_budget_tokens\": 2048, \"_effort_map\": {\"medium\": \"high\"\}, \"_max_reasoning_budget\": 8192\}}"

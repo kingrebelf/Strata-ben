@@ -136,50 +136,80 @@ def reasoning_defaults(st, body, shared=None):
         for k, v in defaults.items():
             if not k.startswith("_"):
                 req.setdefault(k, v)
+    elif defaults.get("_max_reasoning_budget") and not any(k in req for k in budget_keys):
+        # thinking asked for without a budget (the web page's effort buttons): cap it, so a model that loops in its
+        # thinking (seen with GLM-5.3 at 2 bits) cannot run until the context is full
+        req["reasoning_budget_tokens"] = defaults["_max_reasoning_budget"]
     return json.dumps(req).encode()
 
 
 class ChatWatcher:
-    """Follows a /v1/chat/completions answer on its way through (streamed or not) for the web page's Monitor."""
+    """Follows a /v1/chat/completions answer on its way through for the web page's Monitor.
 
-    def __init__(self):
+    For streamed requests the switch asks llama-server for per-token timings and prompt progress
+    (`injected`: timings_per_token, return_progress), feeds them to the Monitor live (reading %, decode and prefill
+    tok/s), and takes those fields out again before the stream reaches the client, so clients get what they asked."""
+
+    def __init__(self, injected=(), max_tokens=None):
         self.started = time.time()
+        self.injected = set(injected)
         self.buf = b""
         self.chunks = 0
         self.timings = None
         self.finish = None
-        UI.req.begin()
+        UI.req.begin(max_tokens)
 
-    def feed(self, data):
+    def transform(self, data):
+        """Bytes from llama-server -> bytes for the client (complete lines only; the rest waits for its newline)."""
         self.buf += data
+        out = []
         while b"\n" in self.buf:
             line, self.buf = self.buf.split(b"\n", 1)
-            self._line(line.strip())
+            out.append(self._line(line) + b"\n")
+        return b"".join(out)
 
-    def _line(self, line):
-        if line.startswith(b"data:"):
-            line = line[5:].strip()
-        if not line.startswith(b"{"):
-            return
+    def flush(self):
+        rest, self.buf = self.buf, b""
+        return self._line(rest) if rest else b""
+
+    def _line(self, raw):
+        line = raw.strip()
+        sse = line.startswith(b"data:")
+        payload = line[5:].strip() if sse else line
+        if not payload.startswith(b"{"):
+            return raw
         try:
-            j = json.loads(line)
+            j = json.loads(payload)
         except ValueError:
-            return
+            return raw
         ch = (j.get("choices") or [{}])[0]
-        if ch.get("delta") is not None:
-            self.chunks += 1
-            if self.chunks % 8 == 0:
-                UI.req.progress(self.chunks)
         if ch.get("finish_reason"):
             self.finish = ch["finish_reason"]
-        if j.get("timings"):
-            self.timings = j["timings"]
+        pp = j.get("prompt_progress")
+        if pp:
+            done = max(0, (pp.get("processed") or 0) - (pp.get("cache") or 0))
+            ms = pp.get("time_ms") or 0
+            UI.req.reading(pp.get("processed"), pp.get("total"), done / (ms / 1000) if ms > 0 else None)
+        t = j.get("timings")
+        if t:
+            self.timings = t
+        delta = ch.get("delta") or {}
+        if delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls"):
+            self.chunks += 1
+            UI.req.generating((t or {}).get("predicted_n") or self.chunks,
+                              (t or {}).get("predicted_per_second"), (t or {}).get("prompt_per_second"))
+        if not sse or not self.injected:
+            return raw
+        changed = False
+        if "return_progress" in self.injected and "prompt_progress" in j:
+            del j["prompt_progress"]
+            changed = True
+        if "timings_per_token" in self.injected and "timings" in j and not ch.get("finish_reason"):
+            del j["timings"]
+            changed = True
+        return b"data: " + json.dumps(j, ensure_ascii=False).encode() if changed else raw
 
     def close(self):
-        if self.buf:
-            self._line(self.buf.strip())
-        t = self.timings or {}
-        UI.tel.note_speed(t.get("predicted_per_second"), t.get("prompt_per_second"))
         UI.req.end(self.timings, self.finish, self.started)
 
 
@@ -311,12 +341,17 @@ class Handler(BaseHTTPRequestHandler):
                 if not chunk:
                     break
                 if watch:
-                    watch.feed(chunk)
+                    chunk = watch.transform(chunk)
+                    if not chunk:
+                        continue
                 if length is None:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 else:
                     self.wfile.write(chunk)
                 self.wfile.flush()
+            tail = watch.flush() if watch else b""
+            if tail:
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(tail), tail) if length is None else tail)
             if length is None:
                 self.wfile.write(b"0\r\n\r\n")
         except (BrokenPipeError, ConnectionResetError):
@@ -420,7 +455,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._decide(st, body)
         if path == "/v1/chat/completions" and self.command == "POST":
             body = reasoning_defaults(st, body, UI.shared_defaults(st.get("name")))
-            return self._proxy(st, body, watch=ChatWatcher())
+            injected, max_tokens = [], None
+            try:
+                req = json.loads(body)
+                max_tokens = req.get("max_tokens") or req.get("max_completion_tokens")
+                if req.get("stream"):   # live numbers for the Monitor; taken out of the stream again (ChatWatcher)
+                    for k in ("timings_per_token", "return_progress"):
+                        if k not in req:
+                            req[k] = True
+                            injected.append(k)
+                    body = json.dumps(req).encode()
+            except (ValueError, AttributeError):
+                pass
+            return self._proxy(st, body, watch=ChatWatcher(injected, max_tokens))
         return self._proxy(st, body)
 
     def do_GET(self):
