@@ -2,10 +2,10 @@
 """model-switch.py - the one front on port 8080.  Exactly one model backend runs at a time (the launchers stop one
 before starting the next); this process only forwards to it and says which one it is.
 
-  backend "strata" (Qwen3.8, Strata's serve/server.py on 127.0.0.1:8081): every request passes through unchanged,
+  backend "strata" (Qwen3.8, Strata's serve/server.py on 127.0.0.1:8181): every request passes through unchanged,
       including the Decisions API (/v1/decide and /v1/systemone), the web UI and the API key check.  The UI page gets one extra
       line in the Monitor tab ("Running model: ...") injected on the way through; Strata's files are not changed.
-  backend "llama" (DeepSeek / GLM, llama-server on 127.0.0.1:8082): /v1/* passes through after the same API key
+  backend "llama" (DeepSeek / GLM, llama-server on 127.0.0.1:8182): /v1/* passes through after the same API key
       check; /v1/decide and /v1/systemone run here with Strata's own serve/systemone.py (imported, unchanged) and
       llama-server's json_schema output; /v1/status and / are answered here.
 

@@ -4,6 +4,9 @@
 
 stop_all || exit 1
 ensure_switch || exit 1
+if listening "$STRATA_PORT"; then   # another service there would answer for Strata: refuse, pick a free port in llm.conf
+	echo "Port $STRATA_PORT is used by another program; set STRATA_PORT in llm.conf to a free port."; exit 1
+fi
 "$LAUNCH/strata-start.sh" || exit 1
 set_active qwen3.8-flash-next "Qwen3.8 Flash Next (Strata)" strata "http://127.0.0.1:$STRATA_PORT"
 if wait_health "$STRATA_PORT" 300; then

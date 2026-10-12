@@ -21,8 +21,8 @@ export PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 cd "$HOME" || exit 1
 
 PORT=${PORT:-8080}
-STRATA_PORT=${STRATA_PORT:-8081}
-LLAMA_PORT=${LLAMA_PORT:-8082}
+STRATA_PORT=${STRATA_PORT:-8181}
+LLAMA_PORT=${LLAMA_PORT:-8182}
 PUBLIC_HOST=${PUBLIC_HOST:-localhost}
 CUDA_DEVICES=${CUDA_DEVICES:-0,1,2,3}
 STRATA_PYTHON=${STRATA_PYTHON:-$STRATA_DIR/.venv/bin/python}

@@ -11,8 +11,8 @@ STRATA_PYTHON=$STRATA_DIR/.venv/bin/python
 
 # Ports: the public one (model-switch.py) and the two private backends (127.0.0.1 only).
 PORT=8080
-STRATA_PORT=8081
-LLAMA_PORT=8082
+STRATA_PORT=8181
+LLAMA_PORT=8182
 
 # The name or address clients use, only for the "Ready: http://.../v1" message.
 PUBLIC_HOST=localhost

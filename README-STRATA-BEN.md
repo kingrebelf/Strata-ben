@@ -65,9 +65,9 @@ Code: [serve/systemone.py](serve/systemone.py) (request checks, prompt, JSON sch
 ## One server, several models
 
 ```
-clients ──> :8080  model-switch.py  ──>  Qwen3.8      Strata serve/server.py   127.0.0.1:8081
-                   (always running)  or  DeepSeek V4  llama-server             127.0.0.1:8082
-                                     or  GLM-5.3      llama-server             127.0.0.1:8082
+clients ──> :8080  model-switch.py  ──>  Qwen3.8      Strata serve/server.py   127.0.0.1:8181
+                   (always running)  or  DeepSeek V4  llama-server             127.0.0.1:8182
+                                     or  GLM-5.3      llama-server             127.0.0.1:8182
 ```
 
 - **Same API on every model**: `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/decide`,
