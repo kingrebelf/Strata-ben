@@ -42,7 +42,8 @@ confidence value, instead of free-text output.</p>
   <tr><td><span class="http">POST</span></td><td><code>/v1/decide</code></td><td>Alias of <code>/v1/systemone</code></td></tr>
 </table>
 <p>Base URL: <code>http://&lt;your-server&gt;:8080</code> (or <code>http://127.0.0.1:8080</code> on the server itself).
-Decisions run on the model the server is running.</p>
+Decisions run on whichever model the server is running (Qwen3.8 on Strata, or DeepSeek V4 Flash / GLM-5.3 on
+llama.cpp behind the model switch; see <code>multimodel/README.md</code>).</p>
 
 <h2>Authentication</h2>
 <p>Every call must include the API key as a bearer token:</p>
@@ -146,7 +147,8 @@ curl -s -X POST http://&lt;your-server&gt;:8080/v1/decide \
 <h2>Notes</h2>
 <ul>
   <li>Questions are answered in a single model generation inside one JSON object, then validated against a strict JSON schema.</li>
-  <li>The endpoint is served by the Strata server, so it is available whenever Strata is running.</li>
+  <li>The endpoint is available whenever a model is running: on Qwen3.8 it is served by the Strata server itself, on the
+      llama.cpp models by the model switch (same request and response format).</li>
   <li>Input budgets follow Jev&rsquo;s: keep each decision context under ~32K tokens, or split the state across multiple calls.</li>
 </ul>
 

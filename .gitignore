@@ -61,3 +61,6 @@ build-vision-cuda12.bat
 
 /.ccache/
 /.rocm-win/
+
+# multimodel launchers: this machine's settings
+/multimodel/llm.conf

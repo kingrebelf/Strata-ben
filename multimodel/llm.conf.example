@@ -1,0 +1,31 @@
+# multimodel/llm.conf - this machine's settings for the model launchers.  Copy this file to llm.conf (next to the
+# launchers) and edit it; llm.conf is gitignored, so paths and host names stay out of the repository.
+
+# The account that owns and runs the models (the launchers refuse to run as anyone else).  Empty: no check.
+SERVICE_USER=
+
+# The Strata checkout (serve/server.py, the .venv, the run config with the API key).
+STRATA_DIR=$HOME/Strata
+STRATA_CONFIG=$STRATA_DIR/strata-iq3_s.json
+STRATA_PYTHON=$STRATA_DIR/.venv/bin/python
+
+# Ports: the public one (model-switch.py) and the two private backends (127.0.0.1 only).
+PORT=8080
+STRATA_PORT=8081
+LLAMA_PORT=8082
+
+# The name or address clients use, only for the "Ready: http://.../v1" message.
+PUBLIC_HOST=localhost
+
+# GPUs the llama.cpp models may use (all of them by default).
+CUDA_DEVICES=0,1,2,3
+
+# DeepSeek V4 Flash (0731) on llama.cpp: a llama-server build with the deepseek4 architecture.
+DS4_LLAMA=$HOME/llama.cpp/build/bin/llama-server
+DS4_MODEL=$HOME/models/DeepSeek-V4-Flash-0731-UD-Q2_K_XL-00001-of-00003.gguf
+DS4_CTX=16384
+
+# GLM-5.3 Flash on llama.cpp: a llama-server build from 2026-10-07 or later (the glm5-next architecture).
+GLM_LLAMA=$HOME/llama.cpp/build/bin/llama-server
+GLM_MODEL=$HOME/models/GLM-5.3-Flash/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf
+GLM_CTX=16384
