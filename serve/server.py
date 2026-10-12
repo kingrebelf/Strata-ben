@@ -2920,7 +2920,7 @@ class Service:
             # one request at a time (more wait their turn), or "parallel": N batch slots (#465)
             "concurrency": {"serving": max(1, int(getattr(self.engine, "batch", 0) or 0)),
                             "requested": max(1, int(getattr(self.engine, "batch", 0) or 0))},
-            "dialects": ["/v1/chat/completions", "/v1/messages", "/v1/responses"],
+            "dialects": ["/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1/systemone"],
             "vision": {"enabled": images, "available": images, "error": None},
             "activity": {"requests": totals["requests"] + int(busy), "in_flight": int(busy) + int(s.get("queued") or 0),
                          "last_request_at": int(last_at) if last_at else None},
@@ -4433,10 +4433,13 @@ def make_handler(svc: Service):
                     except EngineDied as e:
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
-                if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
+                if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses",
+                            "/v1/systemone", "/v1/decide"):
                     self.record = svc.begin_request(path, req)
                 if path == "/v1/responses":
                     self._responses(req)
+                elif path in ("/v1/systemone", "/v1/decide"):
+                    self._systemone(req)
                 elif path.startswith("/slots/"):
                     query = parse_qs(self.path.partition("?")[2])
                     try:
@@ -4749,6 +4752,42 @@ def make_handler(svc: Service):
                 err = {"error": {"type": "server_error", "message": str(e)}}   # headers are sent, so no 400 now
                 self._note(error=err["error"])
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
+
+        def _systemone(self, req):
+            """#Jev: POST /v1/systemone (alias /v1/decide) - the Decisions API.  A `state` and typed
+            `questions` (choice, score, noul) become one structured generation on the main model, and the
+            answers come back in Jev's wire format (serve/systemone.py).  Errors: 400 (bad request, incl.
+            the two token budgets), 401 (key), 409 (busy), 502 (the model's answer was not usable), 503."""
+            from serve import systemone
+            state, questions = systemone.check_request(req)
+            try:
+                systemone.check_budget(state, questions, lambda s: len(svc.tok.encode(s)))
+            except Exception as e:
+                if isinstance(e, ValueError):
+                    raise
+                print(f"[strata] decisions: token count failed, using the estimate: {e}", flush=True)
+                systemone.check_budget(state, questions)
+            messages = [{"role": "system", "content": systemone.SYSTEM},
+                        {"role": "user", "content": systemone.build_prompt(state, questions)}]
+            messages, validator = prepare_format(
+                {"type": "json_schema",
+                 "json_schema": {"name": "systemone", "strict": True, "schema": systemone.build_schema(questions)}},
+                messages)
+            svc.load()
+            ids, thinking, max_new = svc.prepare(messages, None, {"enable_thinking": False}, None, req=req)
+            cancel = threading.Event()
+            self._watch_client(cancel)
+            text, done = [], None
+            for kind, x in svc.run(ids, thinking, None, max_new, req, cancel):
+                if kind == "event" and x.kind == "content":
+                    text.append(x.text or "")
+                elif kind == "done":
+                    done = x
+            if done is None:
+                raise StructuredOutputError("the generation was interrupted before an answer")
+            canonical = validated_json("".join(text), validator, done["finish"])
+            self._json(200, systemone.respond(json.loads(canonical), questions, svc.model,
+                                              done.get("prompt_tokens", len(ids)), done["completion_tokens"]))
 
         def _responses_ready(self, req, events):
             """Send a finished Responses result that did not run on the engine."""
