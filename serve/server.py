@@ -45,7 +45,7 @@ import threading
 import time
 import urllib.request
 import uuid
-from http.client import HTTPException
+from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Iterator, Protocol
@@ -2397,6 +2397,7 @@ class Service:
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
+        self.remote_access = None                      # optional API-only public tunnel, controlled from Settings
         # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
         # turn before the answer instead of the top of the prompt, so switching it keeps the cached conversation
         self.effort_end = False
@@ -2920,7 +2921,7 @@ class Service:
             # one request at a time (more wait their turn), or "parallel": N batch slots (#465)
             "concurrency": {"serving": max(1, int(getattr(self.engine, "batch", 0) or 0)),
                             "requested": max(1, int(getattr(self.engine, "batch", 0) or 0))},
-            "dialects": ["/v1/chat/completions", "/v1/messages", "/v1/responses"],
+            "dialects": ["/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1/systemone"],
             "vision": {"enabled": images, "available": images, "error": None},
             "activity": {"requests": totals["requests"] + int(busy), "in_flight": int(busy) + int(s.get("queued") or 0),
                          "last_request_at": int(last_at) if last_at else None},
@@ -3967,6 +3968,372 @@ def anthropic_collect(events) -> dict:
 CHUNKED_BODY_MAX = 256 << 20                # #893: the most a Transfer-Encoding: chunked body may hold (read into memory)
 
 
+
+class PublicAPIGateway:
+    """A loopback-only proxy that makes only Strata's /v1 API reachable through a public tunnel."""
+
+    HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
+           "transfer-encoding", "upgrade"}
+    MAX_BODY = CHUNKED_BODY_MAX
+
+    def __init__(self, upstream_port: int, listen_port: int = 0):
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+            server_version = "Strata-API"
+
+            def log_message(self, fmt, *args):
+                pass
+
+            def _json(self, code, value):
+                body = json.dumps(value, ensure_ascii=False).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _api_path(self):
+                try:
+                    return urlsplit(self.path).path.startswith("/v1/")
+                except ValueError:
+                    return False
+
+            def _body(self):
+                transfer = (self.headers.get("Transfer-Encoding", "") or "").lower()
+                if transfer.split(",")[-1].strip() == "chunked":
+                    parts, total = [], 0
+                    while True:
+                        line = self.rfile.readline(1025)
+                        if not line.endswith(b"\n"):
+                            raise ValueError("malformed chunked request")
+                        try:
+                            size = int(line.split(b";", 1)[0].strip(), 16)
+                        except ValueError:
+                            raise ValueError("malformed chunk size") from None
+                        if size < 0:
+                            raise ValueError("malformed chunk size")
+                        if size == 0:
+                            for _ in range(64):
+                                if self.rfile.readline(8193).strip() == b"":
+                                    break
+                            return b"".join(parts)
+                        total += size
+                        if total > PublicAPIGateway.MAX_BODY:
+                            raise OverflowError("request body is too large")
+                        chunk = self.rfile.read(size)
+                        if len(chunk) != size or self.rfile.read(2) != b"\r\n":
+                            raise ValueError("incomplete chunked request")
+                        parts.append(chunk)
+                try:
+                    size = int(self.headers.get("Content-Length", "0") or "0")
+                except ValueError:
+                    raise ValueError("invalid content length") from None
+                if size < 0:
+                    raise ValueError("invalid content length")
+                if size > PublicAPIGateway.MAX_BODY:
+                    raise OverflowError("request body is too large")
+                body = self.rfile.read(size)
+                if len(body) != size:
+                    raise ValueError("incomplete request body")
+                return body
+
+            def do_OPTIONS(self):
+                if not self._api_path():
+                    self._json(404, {"error": {"message": "not found"}})
+                    return
+                self.send_response(204)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers",
+                                 "Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta")
+                self.send_header("Access-Control-Max-Age", "600")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def _proxy(self):
+                if not self._api_path():
+                    self._json(404, {"error": {"message": "not found"}})
+                    return
+                try:
+                    body = self._body() if self.command == "POST" else b""
+                except OverflowError:
+                    self._json(413, {"error": {"type": "invalid_request_error",
+                                               "message": "request body is too large"}})
+                    return
+                except (OSError, ValueError):
+                    self._json(400, {"error": {"type": "invalid_request_error",
+                                               "message": "malformed request body"}})
+                    return
+                headers = {k: v for k, v in self.headers.items()
+                           if k.lower() not in PublicAPIGateway.HOP and
+                           k.lower() not in ("host", "content-length")}
+                headers["Host"] = f"127.0.0.1:{upstream_port}"
+                if self.command == "POST":
+                    headers["Content-Length"] = str(len(body))
+                conn = HTTPConnection("127.0.0.1", upstream_port, timeout=3600)
+                response_started = False
+                try:
+                    conn.request(self.command, self.path, body=body if self.command == "POST" else None,
+                                 headers=headers)
+                    response = conn.getresponse()
+                    self.send_response(response.status)
+                    response_started = True
+                    length = response.getheader("Content-Length")
+                    for name, value in response.getheaders():
+                        lower = name.lower()
+                        if lower in PublicAPIGateway.HOP or lower in (
+                            "content-length", "access-control-allow-origin", "access-control-allow-headers",
+                            "access-control-allow-methods", "access-control-max-age",
+                        ):
+                            continue
+                        self.send_header(name, value)
+                    if length is not None:
+                        self.send_header("Content-Length", length)
+                    if self.headers.get("Origin"):
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    while True:
+                        chunk = response.read1(65536) if hasattr(response, "read1") else response.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except (OSError, HTTPException):
+                    if not response_started:
+                        try:
+                            self._json(502, {"error": {"type": "server_error",
+                                                       "message": "Strata's local API is not reachable"}})
+                        except OSError:
+                            pass
+                finally:
+                    conn.close()
+
+            def do_GET(self):
+                self._proxy()
+
+            def do_POST(self):
+                self._proxy()
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", listen_port), Handler)
+        self.httpd.daemon_threads = True
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True,
+                                       name="strata-public-api-gateway")
+        self.thread.start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=2)
+
+
+class RemoteAccessManager:
+    """Owns an optional Cloudflare Quick Tunnel. Only the API gateway is exposed; no Strata UI or admin routes."""
+
+    URL = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.I)
+
+    def __init__(self, api_key: str, upstream_port: int, state_path=None, cloudflared_path=None,
+                 token_path=None, hostname=None, gateway_port=8182):
+        self.api_key = api_key
+        self.upstream_port = upstream_port
+        self.state_path = Path(state_path) if state_path else Path.home() / ".local/state/strata/remote-access.json"
+        self.binary_override = cloudflared_path
+        self.token_path = Path(token_path) if token_path else Path(
+            os.environ.get("STRATA_CLOUDFLARED_TOKEN_FILE") or ROOT / ".venv/cloudflare-tunnel-token")
+        self.hostname = hostname or os.environ.get("STRATA_PUBLIC_HOSTNAME", "strata.nghtmare.com")
+        if not re.fullmatch(r"[a-z0-9.-]+", self.hostname, re.I):
+            self.hostname = ""
+        self.gateway_port = int(gateway_port)
+        self.lock = threading.RLock()
+        self.enabled = False
+        self.state = "off"
+        self.url = None
+        self.message = ""
+        self.proc = None
+        self.gateway = None
+        try:
+            self.enabled = json.loads(self.state_path.read_text(encoding="utf-8")).get("enabled") is True
+        except (OSError, ValueError, AttributeError):
+            self.enabled = False
+        if self.enabled:
+            self.state = "starting"
+
+    def _binary(self):
+        if self.binary_override is not None:
+            candidates = [str(self.binary_override)] if self.binary_override else []
+        else:
+            candidates = [os.environ.get("STRATA_CLOUDFLARED"), shutil.which("cloudflared")]
+            candidates.append(str(ROOT / (".venv/Scripts/cloudflared.exe" if os.name == "nt"
+                                          else ".venv/bin/cloudflared")))
+        for value in candidates:
+            if value and os.path.isfile(value) and os.access(value, os.X_OK):
+                return os.path.abspath(value)
+        return None
+
+    def _write_enabled(self, enabled):
+        self.state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temp = self.state_path.with_name(self.state_path.name + f".{os.getpid()}.tmp")
+        with temp.open("w", encoding="utf-8") as f:
+            json.dump({"enabled": bool(enabled)}, f)
+        try:
+            os.chmod(temp, 0o600)
+        except OSError:
+            pass
+        os.replace(temp, self.state_path)
+
+    def status(self):
+        with self.lock:
+            if self.proc is not None:
+                code = self.proc.poll()
+                if code is not None and self.enabled and self.state in ("starting", "online"):
+                    self.state = "error"
+                    self.url = None
+                    self.message = f"The tunnel stopped unexpectedly (exit code {code}). Turn it off and back on to retry."
+            binary = self._binary()
+            try:
+                token_ready = self.token_path.is_file() and self.token_path.stat().st_size > 0 and os.access(self.token_path, os.R_OK)
+            except OSError:
+                token_ready = False
+            available = bool(self.api_key and binary and token_ready and self.hostname)
+            message = self.message
+            if not self.api_key and not message:
+                message = "Set a Strata API key before enabling public access."
+            elif self.api_key and not binary and not message:
+                message = "cloudflared is not installed on this Strata server."
+            elif self.api_key and binary and not token_ready and not message:
+                message = "Add the named Cloudflare Tunnel token on this Strata server."
+            return {
+                "available": available,
+                "enabled": self.enabled,
+                "state": self.state,
+                "public_endpoint": f"https://{self.hostname}/v1" if self.hostname else None,
+                "message": message,
+            }
+
+    def set_enabled(self, enabled, persist=True):
+        if type(enabled) is not bool:
+            raise ValueError("enabled must be true or false")
+        if not enabled:
+            with self.lock:
+                self.enabled = False
+                self.state = "stopping" if self.proc is not None else "off"
+                self.url = None
+                self.message = ""
+                if persist:
+                    self._write_enabled(False)
+            self._stop_runtime()
+            with self.lock:
+                self.state = "off"
+                self.message = ""
+            return self.status()
+        if not self.api_key:
+            raise RuntimeError("Set a Strata API key before enabling a public endpoint.")
+        binary = self._binary()
+        if not binary:
+            raise RuntimeError("cloudflared is not installed on this Strata server.")
+        if not self.hostname:
+            raise RuntimeError("The public Cloudflare hostname is not configured.")
+        if not self.token_path.is_file() or self.token_path.stat().st_size == 0 or not os.access(self.token_path, os.R_OK):
+            raise RuntimeError("Add the named Cloudflare Tunnel token on this Strata server.")
+        with self.lock:
+            if self.proc is not None and self.proc.poll() is None and self.enabled:
+                return self.status()
+            if self.proc is not None or self.gateway is not None:
+                self._stop_runtime()
+            gateway = PublicAPIGateway(self.upstream_port, listen_port=self.gateway_port)
+            home = ROOT / ".venv" / "cloudflared-home"
+            home.mkdir(parents=True, exist_ok=True, mode=0o700)
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env["XDG_CONFIG_HOME"] = str(home / ".config")
+            command = [binary, "tunnel", "--no-autoupdate", "run",
+                       "--token-file", str(self.token_path)]
+            try:
+                proc = popen("Cloudflare Tunnel", command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
+                             cwd=str(ROOT), env=env)
+                if persist:
+                    self._write_enabled(True)
+            except (OSError, RuntimeError) as e:
+                gateway.close()
+                self.enabled = False
+                self.state = "error"
+                self.message = f"Could not start cloudflared: {e}"
+                self.url = None
+                if persist:
+                    try:
+                        self._write_enabled(False)
+                    except OSError:
+                        pass
+                raise RuntimeError(self.message) from e
+            self.gateway = gateway
+            self.proc = proc
+            self.enabled = True
+            self.state = "starting"
+            self.url = None
+            self.message = f"Connecting the stable Cloudflare endpoint {self.hostname}."
+            threading.Thread(target=self._read_output, args=(proc,), daemon=True,
+                             name="strata-cloudflared-output").start()
+            return self.status()
+
+    def _read_output(self, proc):
+        try:
+            for line in proc.stdout:
+                match = self.URL.search(line)
+                if match or "registered tunnel connection" in line.lower():
+                    with self.lock:
+                        if self.proc is proc and self.enabled:
+                            self.url = match.group(0).rstrip(".,)") if match else f"https://{self.hostname}"
+                            self.state = "online"
+                            self.message = "Stable public API endpoint is ready."
+        except (OSError, ValueError):
+            pass
+        finally:
+            code = proc.poll()
+            with self.lock:
+                if self.proc is proc and self.enabled and code is not None:
+                    self.state = "error"
+                    self.url = None
+                    self.message = f"The tunnel stopped unexpectedly (exit code {code}). Turn it off and back on to retry."
+
+    def start_saved(self):
+        with self.lock:
+            enabled = self.enabled
+        if not enabled:
+            return
+        try:
+            self.set_enabled(True, persist=False)
+        except (OSError, RuntimeError) as e:
+            with self.lock:
+                self.state = "error"
+                self.message = str(e)
+
+    def _stop_runtime(self):
+        with self.lock:
+            proc, gateway = self.proc, self.gateway
+            self.proc = None
+            self.gateway = None
+            self.url = None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
+            except OSError:
+                pass
+        if gateway is not None:
+            gateway.close()
+
+    def close(self):
+        self._stop_runtime()
+
+
 class BadBody(Exception):
     """A request body that cannot be read (a malformed or oversized chunked body): the status and the sentence."""
 
@@ -4273,6 +4640,10 @@ def make_handler(svc: Service):
                 if self._authorized():
                     self._json(200, {"shared": bool(svc.shared), "defaults": svc.shared})
                 return
+            if path == "/remote-access":
+                if self._authorized():
+                    self._json(200, self._remote_access_status())
+                return
             if path == "/config":                            # #564: the Settings view's keys of the run config
                 if self._authorized():
                     self._config_get()
@@ -4364,6 +4735,9 @@ def make_handler(svc: Service):
             if path == "/settings":
                 self._settings()
                 return
+            if path == "/remote-access":
+                self._remote_access_post()
+                return
             if path == "/config":
                 self._config_post()
                 return
@@ -4433,10 +4807,13 @@ def make_handler(svc: Service):
                     except EngineDied as e:
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
-                if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
+                if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses",
+                            "/v1/systemone", "/v1/decide"):
                     self.record = svc.begin_request(path, req)
                 if path == "/v1/responses":
                     self._responses(req)
+                elif path in ("/v1/systemone", "/v1/decide"):
+                    self._systemone(req)
                 elif path.startswith("/slots/"):
                     query = parse_qs(self.path.partition("?")[2])
                     try:
@@ -4560,6 +4937,49 @@ def make_handler(svc: Service):
                                                       f"config's trusted_origins)"}})
                 return False
             return True
+
+        def _remote_access_status(self):
+            manager = svc.remote_access
+            result = manager.status() if manager else {
+                "available": False, "enabled": False, "state": "off", "public_endpoint": None,
+                "message": "Public endpoint control is unavailable in this server.",
+            }
+            try:
+                scheme = urlsplit(self.headers.get("Origin", "")).scheme
+                if scheme not in ("http", "https"):
+                    scheme = "http"
+                host = urlsplit("//" + (self.headers.get("Host", "") or ""))
+                port = host.port or (443 if scheme == "https" else 80)
+                suffix = "" if (scheme == "http" and port == 80) or (scheme == "https" and port == 443) \
+                    else f":{port}"
+                result["local_endpoints"] = [f"{scheme}://{ip}{suffix}/v1" for ip in lan_addresses()]
+            except (ValueError, OSError):
+                result["local_endpoints"] = []
+            return result
+
+        def _remote_access_post(self):
+            body = self._body()
+            if not self._own_page("public API access can be changed"):
+                return
+            try:
+                req = json.loads(body or b"{}")
+            except (ValueError, TypeError):
+                self._json(400, {"error": {"type": "invalid_request_error", "message": "send valid JSON"}})
+                return
+            if not isinstance(req, dict) or type(req.get("enabled")) is not bool:
+                self._json(400, {"error": {"type": "invalid_request_error",
+                                           "message": 'the body must be {"enabled": true} or {"enabled": false}'}})
+                return
+            if not svc.remote_access:
+                self._json(503, {"error": {"type": "server_error", "message":
+                                           "public endpoint control is unavailable in this server"}})
+                return
+            try:
+                svc.remote_access.set_enabled(req["enabled"])
+            except (OSError, RuntimeError, ValueError) as e:
+                self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+                return
+            self._json(200, self._remote_access_status())
 
         def _config_get(self):
             if not svc.config_path:
@@ -4749,6 +5169,42 @@ def make_handler(svc: Service):
                 err = {"error": {"type": "server_error", "message": str(e)}}   # headers are sent, so no 400 now
                 self._note(error=err["error"])
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
+
+        def _systemone(self, req):
+            """#Jev: POST /v1/systemone (alias /v1/decide) - the Decisions API.  A `state` and typed
+            `questions` (choice, score, noul) become one structured generation on the main model, and the
+            answers come back in Jev's wire format (serve/systemone.py).  Errors: 400 (bad request, incl.
+            the two token budgets), 401 (key), 409 (busy), 502 (the model's answer was not usable), 503."""
+            from serve import systemone
+            state, questions = systemone.check_request(req)
+            try:
+                systemone.check_budget(state, questions, lambda s: len(svc.tok.encode(s)))
+            except Exception as e:
+                if isinstance(e, ValueError):
+                    raise
+                print(f"[strata] decisions: token count failed, using the estimate: {e}", flush=True)
+                systemone.check_budget(state, questions)
+            messages = [{"role": "system", "content": systemone.SYSTEM},
+                        {"role": "user", "content": systemone.build_prompt(state, questions)}]
+            messages, validator = prepare_format(
+                {"type": "json_schema",
+                 "json_schema": {"name": "systemone", "strict": True, "schema": systemone.build_schema(questions)}},
+                messages)
+            svc.load()
+            ids, thinking, max_new = svc.prepare(messages, None, {"enable_thinking": False}, None, req=req)
+            cancel = threading.Event()
+            self._watch_client(cancel)
+            text, done = [], None
+            for kind, x in svc.run(ids, thinking, None, max_new, req, cancel):
+                if kind == "event" and x.kind == "content":
+                    text.append(x.text or "")
+                elif kind == "done":
+                    done = x
+            if done is None:
+                raise StructuredOutputError("the generation was interrupted before an answer")
+            canonical = validated_json("".join(text), validator, done["finish"])
+            self._json(200, systemone.respond(json.loads(canonical), questions, svc.model,
+                                              done.get("prompt_tokens", len(ids)), done["completion_tokens"]))
 
         def _responses_ready(self, req, events):
             """Send a finished Responses result that did not run on the engine."""
@@ -5556,7 +6012,9 @@ def main() -> int:
               f"chat: {', '.join(hub.servers)}", flush=True)
         hub.start()
         atexit.register(hub.close)                      # the servers Strata started end with it
+    svc.remote_access = RemoteAccessManager(svc.api_key, a.port)
     httpd = serve(svc, host=a.host, port=a.port)
+    svc.remote_access.start_saved()
     svc.start_idle_unload()
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
@@ -5595,7 +6053,8 @@ def main() -> int:
             time.sleep(1)                               # Windows never delivers Ctrl+C to an untimed Event.wait()
     except KeyboardInterrupt:
         print("\n[strata] stopping (Ctrl+C again to end the engine at once) ...", flush=True)
-        closers = [httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
+        closers = [svc.remote_access.close if svc.remote_access else None, httpd.shutdown,
+                   getattr(engine, "close", None), vision.shutdown if vision else None,
                    hub.close if hub is not None else None]
         for close in filter(None, closers):
             try:

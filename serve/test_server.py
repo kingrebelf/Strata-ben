@@ -22,7 +22,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate, literal_tags, mark_think_literals, unmark_think_literals  # noqa: E402
-from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, GpuBusy, MockEngine, PP_DONE_TAIL, Service,  # noqa: E402
+from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, GpuBusy, MockEngine, PP_DONE_TAIL, PublicAPIGateway, RemoteAccessManager, Service,  # noqa: E402
                           StrataEngine, api_key_of, engine_args, key_matches, layer_split_value, prompt_progress,
                           prompt_tokens_seen,
                           request_timings, serve, start_failure_hint)
@@ -4791,6 +4791,153 @@ class UntimedReads(unittest.TestCase):
         v = server.Vision.__new__(server.Vision)
         v.proc = SimpleNamespace(stdout=SimpleNamespace(readline=lambda: "OK 7 1 1 1\n"))
         self.assertEqual(v._readline(5.0, "x"), "OK 7 1 1 1\n")
+
+
+class PublicEndpointTests(unittest.TestCase):
+    def test_gateway_forwards_keyed_v1_requests_and_blocks_admin_routes(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        received = {}
+
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                received["path"] = self.path
+                received["auth"] = self.headers.get("Authorization")
+                received["body"] = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                payload = b"accepted"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        upstream_thread.start()
+        gateway = PublicAPIGateway(upstream.server_address[1])
+        try:
+            payload = b'{"model":"test","messages":[]}'
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{gateway.port}/v1/chat/completions",
+                data=payload,
+                headers={"Authorization": "Bearer test-key", "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read(), b"accepted")
+            self.assertEqual(received, {
+                "path": "/v1/chat/completions",
+                "auth": "Bearer test-key",
+                "body": payload,
+            })
+
+            preflight = urllib.request.Request(
+                f"http://127.0.0.1:{gateway.port}/v1/messages",
+                method="OPTIONS",
+                headers={"Origin": "https://client.example"},
+            )
+            with urllib.request.urlopen(preflight, timeout=5) as response:
+                self.assertEqual(response.status, 204)
+                self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), "*")
+
+            blocked = urllib.request.Request(f"http://127.0.0.1:{gateway.port}/settings")
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(blocked, timeout=5)
+            self.assertEqual(error.exception.code, 404)
+        finally:
+            gateway.close()
+            upstream.shutdown()
+            upstream.server_close()
+            upstream_thread.join(timeout=2)
+
+    def test_manager_requires_api_key_and_cloudflared(self):
+        with tempfile.TemporaryDirectory(prefix="strata-public-access-test-") as tmp:
+            state = Path(tmp) / "remote-access.json"
+            no_key = RemoteAccessManager("", 8181, state_path=state, cloudflared_path="/missing/cloudflared")
+            self.assertFalse(no_key.status()["available"])
+            with self.assertRaisesRegex(RuntimeError, "API key"):
+                no_key.set_enabled(True)
+
+            no_binary = RemoteAccessManager("secret", 8181, state_path=state, cloudflared_path="/missing/cloudflared")
+            self.assertFalse(no_binary.status()["available"])
+            with self.assertRaisesRegex(RuntimeError, "cloudflared"):
+                no_binary.set_enabled(True)
+
+            binary = Path(tmp) / "cloudflared"
+            binary.write_text("#!/bin/sh\\nexit 0\\n")
+            binary.chmod(0o755)
+            token = Path(tmp) / "missing-token"
+            no_token = RemoteAccessManager("secret", 8181, state_path=state,
+                                          cloudflared_path=binary, token_path=token)
+            self.assertFalse(no_token.status()["available"])
+            self.assertEqual(no_token.status()["public_endpoint"], "https://strata.nghtmare.com/v1")
+            with self.assertRaisesRegex(RuntimeError, "Tunnel token"):
+                no_token.set_enabled(True)
+
+            result = no_binary.set_enabled(False)
+            self.assertFalse(result["enabled"])
+            self.assertFalse(json.loads(state.read_text())["enabled"])
+
+    def test_remote_access_routes_require_key_and_reject_foreign_origin(self):
+        tok = ByteTokenizer()
+        engine = MockEngine(tok, "ok", max_context=CTX)
+        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"), model_name="test")
+        svc.api_key = "test-key"
+
+        class Manager:
+            enabled = False
+
+            def status(self):
+                return {
+                    "available": True, "enabled": self.enabled,
+                    "state": "online" if self.enabled else "off",
+                    "public_endpoint": "https://example.trycloudflare.com/v1" if self.enabled else None,
+                    "message": "",
+                }
+
+            def set_enabled(self, enabled):
+                self.enabled = enabled
+                return self.status()
+
+        svc.remote_access = Manager()
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(base + "/remote-access", timeout=5)
+            self.assertEqual(error.exception.code, 401)
+
+            foreign = urllib.request.Request(
+                base + "/remote-access",
+                data=b'{"enabled":true}',
+                headers={
+                    "Authorization": "Bearer test-key",
+                    "Content-Type": "application/json",
+                    "Origin": "https://outside.example",
+                },
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(foreign, timeout=5)
+            self.assertEqual(error.exception.code, 403)
+            self.assertFalse(svc.remote_access.enabled)
+
+            same_page = urllib.request.Request(
+                base + "/remote-access",
+                data=b'{"enabled":true}',
+                headers={"Authorization": "Bearer test-key", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(same_page, timeout=5) as response:
+                body = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertTrue(body["enabled"])
+            self.assertTrue(body["local_endpoints"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 if __name__ == "__main__":

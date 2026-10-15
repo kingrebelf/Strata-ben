@@ -79,7 +79,7 @@ function showTab(name) {
   if (location.hash.slice(1) !== tab) history.replaceState(null, "", tab === "chat" ? location.pathname : `#${tab}`);
   if (tab === "chat") $("input").focus();
   if (tab === "monitor") loadMcp();
-  if (tab === "about") loadConfig();
+  if (tab === "about") { loadConfig(); loadRemoteAccess(); }
   if (lastMetrics) render(lastMetrics);
 }
 for (const b of document.querySelectorAll(".st-tab")) b.onclick = () => showTab(b.dataset.tab);
@@ -430,6 +430,70 @@ function renderMcp() {
       `</div>`;
   }).join("");
 }
+
+// ------------------------------------------------------------------ Local and public API endpoints
+let remoteAccess = null, remoteBusy = false, remoteLoading = false, remoteAccessTimer = null;
+function renderRemoteAccess(data) {
+  remoteAccess = data;
+  const local = $("remote-local-endpoints");
+  const endpoints = Array.isArray(data.local_endpoints) ? data.local_endpoints : [];
+  facts(local, endpoints.map((endpoint, index) => ["Address " + (index + 1), endpoint, true]));
+  if (!endpoints.length) local.innerHTML = '<dt>Address</dt><dd>No local network address was found.</dd>';
+  const toggle = $("public-api-toggle");
+  toggle.setAttribute("aria-checked", String(data.enabled === true));
+  toggle.disabled = !data.available || remoteBusy;
+  const names = {off: "Off", starting: "Starting...", online: "Online", stopping: "Stopping...", error: "Error"};
+  $("remote-access-state").textContent = names[data.state] || "Unknown";
+  $("remote-access-message").textContent = data.message ||
+    (data.state === "online" ? "The public API endpoint is ready." :
+      data.state === "off" && data.available ? "Public access is off." : "");
+  const row = $("remote-public-row");
+  row.hidden = !data.public_endpoint;
+  facts($("remote-public-facts"), [["Public API URL", data.public_endpoint, true]]);
+  if (data.enabled && (data.state === "starting" || data.state === "online")) {
+    if (!remoteAccessTimer) remoteAccessTimer = setInterval(() => {
+      if (tab === "about") loadRemoteAccess();
+    }, 2500);
+  } else if (remoteAccessTimer) {
+    clearInterval(remoteAccessTimer);
+    remoteAccessTimer = null;
+  }
+}
+async function loadRemoteAccess() {
+  if (remoteLoading) return;
+  remoteLoading = true;
+  try {
+    const r = await fetch("remote-access", {headers: headers()});
+    const body = await r.json();
+    if (!r.ok) throw new Error((body.error || {}).message || "Could not load endpoint settings.");
+    renderRemoteAccess(body);
+  } catch (e) {
+    $("remote-access-state").textContent = "Unavailable";
+    $("remote-access-message").textContent = String(e.message || e);
+  } finally {
+    remoteLoading = false;
+  }
+}
+$("public-api-toggle").addEventListener("click", async () => {
+  if (!remoteAccess || remoteBusy) return;
+  const enabled = $("public-api-toggle").getAttribute("aria-checked") !== "true";
+  remoteBusy = true;
+  $("public-api-toggle").disabled = true;
+  $("remote-access-state").textContent = enabled ? "Starting..." : "Stopping...";
+  try {
+    const r = await fetch("remote-access", {method: "POST", headers: headers(true),
+      body: JSON.stringify({enabled})});
+    const body = await r.json();
+    if (!r.ok) throw new Error((body.error || {}).message || "Could not change public access.");
+    renderRemoteAccess(body);
+  } catch (e) {
+    toast("error", "Public endpoint not changed", String(e.message || e), 6000);
+    await loadRemoteAccess();
+  } finally {
+    remoteBusy = false;
+    if (remoteAccess) renderRemoteAccess(remoteAccess);
+  }
+});
 
 // ------------------------------------------------------------------ Model settings (GET / POST /config, #564)
 // A few documented keys of the run config (strata-<model>.json), for every client, from the next start on.  The

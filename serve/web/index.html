@@ -173,6 +173,22 @@
         <p class="muted small">Chats, settings and the key are kept in this browser only.
           <a href="https://github.com/Niko1221/Strata" target="_blank" rel="noopener noreferrer">Strata on GitHub</a></p>
       </div>
+      <div class="st-card" id="remote-access-card">
+        <div class="req-head"><span class="card-title">API endpoints</span><span class="muted small" id="remote-access-state" role="status">Checking...</span></div>
+        <p class="muted">Use these with Strata API clients. Every request needs your Strata API key.</p>
+        <div class="st-field">
+          <label class="st-label">Local endpoint</label>
+          <dl class="facts" id="remote-local-endpoints"></dl>
+        </div>
+        <div class="toggle-row"><span>Public endpoint<br><span class="muted small">Allow apps outside your network to reach this Strata server</span></span>
+          <button class="st-toggle" id="public-api-toggle" role="switch" aria-checked="false" aria-label="Public API endpoint" disabled></button></div>
+        <div class="st-field" id="remote-public-row" hidden>
+          <label class="st-label">Public endpoint</label>
+<dl class="facts" id="remote-public-facts"></dl>
+        </div>
+        <p class="muted small" id="remote-access-message" role="status"></p>
+        <p class="muted small">This stable hostname uses a named Cloudflare Tunnel. Turn public access off here any time; the local endpoint remains available on your network.</p>
+      </div>
       <div class="st-card cfg-card" id="cfg-card" hidden>
         <div class="req-head"><span class="card-title">Model settings</span><span class="muted small" id="cfg-file"></span></div>
         <p class="muted small">Kept in the model's run config for every client. An empty field is the default. They
