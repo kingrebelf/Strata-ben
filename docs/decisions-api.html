@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strata Decisions API</title>
+<style>
+  :root { color-scheme: light dark }
+  body { font-family: system-ui, "Segoe UI", Roboto, sans-serif; line-height: 1.6; max-width: 860px; margin: 0 auto; padding: 2rem 1.2rem 4rem; color: #1c2733; background: #f6f8fa }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0f1720; color: #dbe4ee }
+    pre, code { background: #16212d; color: #dbe4ee }
+    h2 { border-color: #2a3b4d }
+    table { border-color: #2a3b4d }
+    th { background: #16212d }
+  }
+  h1 { font-size: 1.7rem; margin-bottom: .2rem }
+  h2 { font-size: 1.15rem; margin-top: 2.4rem; padding-bottom: .3rem; border-bottom: 2px solid #d5dee6 }
+  p, li { margin: .4rem 0 }
+  code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .88em; background: #e8eef3; padding: .1em .35em; border-radius: 4px }
+  pre { background: #eaf0f5; padding: .9rem 1rem; border-radius: 8px; overflow-x: auto; font-size: .85rem }
+  pre code { background: none; padding: 0 }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0 }
+  th, td { text-align: left; padding: .45rem .6rem; border: 1px solid #d5dee6; vertical-align: top }
+  th { background: #e8eef3 }
+  .http { font-weight: 600; color: #0b5c2e }
+  .muted { color: #64748b }
+  a { color: #0b6bcb }
+
+  :root { color-scheme: dark; }
+  body { color: #dbe4ee; background: #0f1720; }
+  h1 { color: #f2f6fa; }
+  h2 { border-color: #2a3b4d; }
+  code, pre { color: #d9eaff; background: #16212d; border: 1px solid #2a3b4d; border-radius: 6px; }
+  pre { color: #e3edf7; background: #101923; border-radius: 10px; }
+  pre code { display: block; color: #e3edf7; background: transparent; border: 0; padding: 0; }
+  table { border-collapse: collapse; }
+  th, td { background: #111b25; border-color: #2a3b4d; color: #dbe4ee; }
+  th { background: #16212d; color: #f2f6fa; }
+  .http { color: #7ce0a0; }
+  .muted { color: #9baaba; }
+  a { color: #8ec5ff; text-underline-offset: .15em; }
+  a:hover { color: #b7dcff; }
+  a:focus-visible { outline: 2px solid #8ec5ff; outline-offset: 3px; border-radius: 3px; }
+
+</style>
+</head>
+<body>
+
+<h1>Strata Decisions API</h1>
+<p class="muted">A Jev-compatible "System One" decision endpoint built into the local Strata server.
+It answers typed questions about a piece of input state with a probability distribution and a
+confidence value, instead of free-text output.</p>
+
+<h2>Endpoints</h2>
+<table>
+  <tr><th>Method</th><th>Path</th><th>Purpose</th></tr>
+  <tr><td><span class="http">POST</span></td><td><code>/v1/systemone</code></td><td>Primary endpoint</td></tr>
+  <tr><td><span class="http">POST</span></td><td><code>/v1/decide</code></td><td>Alias of <code>/v1/systemone</code></td></tr>
+</table>
+<p>Base URL on this machine: <code>http://10.0.0.18:8080</code> (or <code>http://127.0.0.1:8080</code>).
+Decisions run on the local model (<code>qwen3.8-flash-next-iq3_s</code>, 256K context).</p>
+<p><strong>Public API base URL:</strong> <a href="https://strata.nghtmare.com/v1" rel="noopener noreferrer"><code>https://strata.nghtmare.com/v1</code></a>. Use this URL from outside the local network; decision requests still require the bearer API key.</p>
+
+<h2>Authentication</h2>
+<p>Every call must include the API key as a bearer token:</p>
+<pre><code>Authorization: Bearer &lt;API_KEY&gt;</code></pre>
+<p class="muted">The key is stored on the desktop in the file <code>/home/max/Desktop/API- Strata</code>.
+Requests without a valid key get <code>401 authentication_error</code>. <code>/health</code> on port 8080 is
+public and does not need a key.</p>
+
+<h2>Request</h2>
+<p>Send a JSON object with a <code>state</code> and typed <code>questions</code>:</p>
+<pre><code>{
+  "model": "jev-latest",                                  // optional; ignored, runs on the local model
+  "state": "Customer was charged twice and nobody replied for 3 days.", // string, object, or array
+  "questions": {
+    "route":    { "type": "choice", "instructions": "...", "criteria": { ... } },
+    "urgency":  { "type": "score",  "instructions": "...", "criteria": [ ... ] },
+    "escalate": { "type": "noul",   "instructions": "..." }
+  }
+}</code></pre>
+
+<h3>Question types</h3>
+<table>
+  <tr><th>type</th><th>criteria</th><th>Answer fields</th></tr>
+  <tr>
+    <td><code>choice</code></td>
+    <td>Object of labels to short descriptions (or <code>null</code>), 1&ndash;255 options</td>
+    <td><code>choice</code>, <code>probabilities</code>, <code>confidence</code></td>
+  </tr>
+  <tr>
+    <td><code>score</code></td>
+    <td>Ordered list of 2&ndash;10 level descriptions (low to high)</td>
+    <td><code>score</code>, <code>legend</code>, <code>probabilities</code>, <code>confidence</code></td>
+  </tr>
+  <tr>
+    <td><code>noul</code></td>
+    <td>Optional; may hold <code>"true"</code> / <code>"false"</code> descriptions</td>
+    <td><code>noul</code> (no confidence field)</td>
+  </tr>
+</table>
+<p>Every question needs <code>instructions</code>: what the model should decide. Generic "which is the
+best option?" text works, but specific instructions produce better-calibrated answers.</p>
+
+<h2>Response</h2>
+<pre><code>{
+  "model": "qwen3.8-flash-next-iq3_s",
+  "answers": {
+    "route": {
+      "type": "choice", "choice": "billing",
+      "probabilities": { "billing": 0.7, "bug": 0.1, "account": 0.2 },
+      "confidence": 0.7
+    },
+    "urgency": {
+      "type": "score", "score": 2.3,
+      "legend": ["routine", "today", "urgent", "critical"],
+      "probabilities": { "0": 0.0, "1": 0.1, "2": 0.5, "3": 0.4 },
+      "confidence": 0.5
+    },
+    "escalate": { "type": "noul", "noul": 0.8 }
+  },
+  "usage": { "input_tokens": 671, "output_tokens": 173 }
+}</code></pre>
+<table>
+  <tr><th>Field</th><th>Meaning</th></tr>
+  <tr><td><code>answers.&lt;name&gt;.confidence</code></td><td>The winning probability for choice/score answers (highest value after normalization).</td></tr>
+  <tr><td><code>score</code></td><td>Probability-weighted position on the level scale, 0 = first list entry, <code>n-1</code> = last.</td></tr>
+  <tr><td><code>noul</code></td><td>Probability the answer is <em>yes</em>, from 0 to 1.</td></tr>
+  <tr><td><code>probabilities</code></td><td>Normalized to sum to 1 for choice and score.</td></tr>
+</table>
+<p class="muted">These are the model&rsquo;s own probability estimates, not outputs of a separately
+calibrated classifier. Gate decisions on <code>confidence</code>, and pick thresholds that fit your use case.</p>
+
+<h2>Worked example (cURL)</h2>
+<pre><code>KEY="$(cat "/home/max/Desktop/API- Strata")"
+
+curl -s -X POST https://strata.nghtmare.com/v1/decide \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{
+    "state": "Customer: \"I paid for a 2-month plan but the account shows 1 month, and support chat has been silent for 3 days.\"",
+    "questions": {
+      "route":   { "type": "choice", "instructions": "Which team owns this?",
+                   "criteria": { "billing": "payments and amounts", "bug": "a product defect", "account": "login and plan status" } },
+      "urgency": { "type": "score", "instructions": "How urgent is this for the customer?",
+                   "criteria": ["routine", "today", "urgent", "critical"] },
+      "escalate":{ "type": "noul", "instructions": "Should a human supervisor step in now?" }
+    }
+  }'</code></pre>
+
+<h2>Errors</h2>
+<table>
+  <tr><th>Status</th><th><code>error.type</code></th><th>When</th></tr>
+  <tr><td>400</td><td><code>invalid_request_error</code></td><td>Malformed request, bad question <code>type</code>, empty
+      <code>criteria</code>, too many choice options (&gt;255), fewer than 2 or more than 10 score levels, missing <code>instructions</code>.</td></tr>
+  <tr><td>400</td><td><code>max_tokens_exceeded</code></td><td>Input over Jev&rsquo;s budgets: 32,000 tokens for the state plus the
+      longest question, or 64,000 tokens for the whole request.</td></tr>
+  <tr><td>401</td><td><code>authentication_error</code></td><td>Missing or invalid <code>Authorization: Bearer</code> key.</td></tr>
+  <tr><td>409</td><td><code>busy_error</code></td><td>A request is already running on the single local model.</td></tr>
+  <tr><td>502</td><td>structured output error</td><td>The model answered but the result could not be validated against the schema.</td></tr>
+  <tr><td>503</td><td><code>try again later</code></td><td>The engine is busy warming up or loading.</td></tr>
+</table>
+
+<h2>Notes</h2>
+<ul>
+  <li>Questions are answered in a single model generation inside one JSON object, then validated against a strict JSON schema.</li>
+  <li>The endpoint is served by the Strata server, so it is available whenever Strata is running (use the desktop <em>Strata Start</em> shortcut).</li>
+  <li>Input budgets follow Jev&rsquo;s: keep each decision context under ~32K tokens, or split the state across multiple calls.</li>
+</ul>
+
+</body>
+</html>
