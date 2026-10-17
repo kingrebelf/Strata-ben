@@ -64,6 +64,7 @@ from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
+from serve.api_keys import APIKeyStore  # noqa: E402
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -2877,6 +2878,7 @@ class Service:
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
+        self.api_key_store = None                      # private extra keys and per-key usage history
         # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
         # turn before the answer instead of the top of the prompt, so switching it keeps the cached conversation
         self.effort_end = False
@@ -3359,8 +3361,9 @@ class Service:
             reading = self.status.get("busy") and self.status.get("first_token") is None
         return getattr(self.engine, "prefill_tok_s_mean", None) if reading else 0.0
 
-    def begin_request(self, path, req):
-        """#332: a monitor record for this request, or None when the monitor is off (nothing is kept then)."""
+    def begin_request(self, path, req, key_id=None):
+        """Start request tracing and, when enabled, retain a monitor record."""
+        self.request_trace.api_key_id = key_id
         if not self.api_monitor:
             return None
         raw = json.dumps(req, ensure_ascii=False, indent=2)
@@ -4166,6 +4169,7 @@ class Service:
                 finally:
                     # #266: settle this request's status, history and totals while still holding the fifo: once
                     # it is released the next request sets its own status, which this must not record or clear
+                    usage_event = None
                     with self.status_lock:
                         if st.get("busy"):
                             last = request_stats(segments)          # only this request's own DONEs count
@@ -4179,6 +4183,8 @@ class Service:
                             pcie_share = round(last["offloaded"] / routed, 3) \
                                 if last.get("offloaded") is not None and routed else None
                             seen = prompt_tokens_seen(len(ids), last)   # #471: < len(ids) when cancelled mid-read
+                            usage_event = (getattr(self.request_trace, "api_key_id", None),
+                                           last.get("reused") or 0, n, time.time())
                             self.history.append({
                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
                                 if loaded else None,
@@ -4240,6 +4246,11 @@ class Service:
                                 self.status.update(busy=False)
                                 self.status.pop("tail", None)
                                 self.status.pop("tool", None)
+                    if usage_event is not None and self.api_key_store is not None:
+                        try:
+                            self.api_key_store.record_usage(*usage_event)
+                        except OSError as e:
+                            print(f"[strata] API key usage could not be saved: {e}", flush=True)
         finally:
             if emb:
                 Path(emb).unlink(missing_ok=True)
@@ -4963,6 +4974,7 @@ def make_handler(svc: Service):
             body = json.dumps(obj, ensure_ascii=False).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
             for k, v in (headers or {}).items():
                 self.send_header(k, str(v))
             self._cors()
@@ -4970,18 +4982,91 @@ def make_handler(svc: Service):
             self.end_headers()
             self.wfile.write(body)
 
-        def _authorized(self) -> bool:
+        def _authorized(self, admin=False, require_primary=False) -> bool:
             if not svc.api_key:
+                if require_primary:
+                    self._json(403, {"error": {"type": "forbidden",
+                                               "message": "Set a primary Strata API key to manage API keys."}})
+                    return False
+                self.api_key_id = None
+                self.is_primary_key = False
                 return True
             auth = self.headers.get("Authorization", "")
             given = auth[7:].strip() if auth.lower().startswith("bearer ") else self.headers.get("x-api-key", "")
-            if key_matches(given, svc.api_key):
-                return True
-            self._json(401, {"error": {"type": "authentication_error", "message": "missing or wrong API key"}})
-            return False
+            key_id = svc.api_key_store.authenticate(given) if svc.api_key_store else \
+                ("primary" if key_matches(given, svc.api_key) else None)
+            if key_id is None:
+                self._json(401, {"error": {"type": "authentication_error", "message": "missing or wrong API key"}})
+                return False
+            self.api_key_id = key_id
+            self.is_primary_key = key_id == "primary"
+            path = urlsplit(self.path).path.rstrip("/")
+            admin_path = (not path.startswith("/v1/") or path in ("/v1/status", "/v1/load", "/v1/unload", "/v1/vram")
+                          or path.startswith("/slots/"))
+            if (admin or require_primary or admin_path) and not self.is_primary_key:
+                self._json(403, {"error": {"type": "forbidden",
+                                           "message": "This action needs the primary Strata API key."}})
+                return False
+            return True
+
+        def _api_key_usage(self):
+            if svc.api_key_store is None:
+                self._json(503, {"error": {"message": "API key usage is unavailable."}})
+                return
+            range_name = parse_qs(urlsplit(self.path).query).get("range", ["24h"])[0]
+            try:
+                self._json(200, svc.api_key_store.usage(range_name))
+            except ValueError as e:
+                self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
+
+        def _api_key_create(self):
+            body = self._body()
+            if not self._own_page("API keys can be created"):
+                return
+            try:
+                req = json.loads(body or b"{}")
+                if not isinstance(req, dict):
+                    raise ValueError("Send a JSON object with a name for the API key.")
+                key = svc.api_key_store.create(req.get("name"))
+            except ValueError as e:
+                self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                return
+            except OSError as e:
+                self._json(500, {"error": {"message": f"The key could not be saved on this PC: {e}"}})
+                return
+            self._json(201, key)
+
+        def _api_key_revoke(self):
+            body = self._body()
+            if not self._own_page("API keys can be revoked"):
+                return
+            try:
+                req = json.loads(body or b"{}")
+                if not isinstance(req, dict):
+                    raise ValueError("Send a JSON object with the key id to revoke.")
+                result = svc.api_key_store.revoke(req.get("id"))
+            except (ValueError, KeyError) as e:
+                self._json(404 if isinstance(e, KeyError) else 400,
+                           {"error": {"type": "invalid_request_error", "message": str(e)}})
+                return
+            except OSError as e:
+                self._json(500, {"error": {"message": f"The key could not be revoked on this PC: {e}"}})
+                return
+            self._json(200, result)
 
         def do_GET(self):
             path = self.path.split("?")[0].rstrip("/")
+            if path == "/api-keys":
+                if self._authorized(admin=True, require_primary=True):
+                    if svc.api_key_store is None:
+                        self._json(503, {"error": {"message": "API key management is unavailable."}})
+                    else:
+                        self._json(200, {"keys": svc.api_key_store.list_keys()})
+                return
+            if path == "/api-key-usage":
+                if self._authorized(admin=True, require_primary=True):
+                    self._api_key_usage()
+                return
             if path.startswith("/fonts/"):
                 # the web app's font (Outfit, OFL: serve/web/fonts); the page falls back to the system font
                 name = path[len("/fonts/"):]
@@ -5135,9 +5220,22 @@ def make_handler(svc: Service):
                 self._json(e.status, {"error": {"type": "invalid_request_error", "message": str(e)}})
 
         def _post(self):
-            if not self._authorized():
-                return
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
+            key_admin_path = path in ("/api-keys", "/api-keys/revoke")
+            if not self._authorized(require_primary=key_admin_path):
+                return
+            if path == "/api-keys":
+                if svc.api_key_store is None:
+                    self._json(503, {"error": {"message": "API key management is unavailable."}})
+                else:
+                    self._api_key_create()
+                return
+            if path == "/api-keys/revoke":
+                if svc.api_key_store is None:
+                    self._json(503, {"error": {"message": "API key management is unavailable."}})
+                else:
+                    self._api_key_revoke()
+                return
             if path.startswith("/v1/") and self._foreign_page():
                 return
             if path == "/settings":
@@ -5219,7 +5317,7 @@ def make_handler(svc: Service):
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
-                    self.record = svc.begin_request(path, req)
+                    self.record = svc.begin_request(path, req, key_id=getattr(self, "api_key_id", None))
                 if path == "/v1/responses":
                     self._responses(req)
                 elif path.startswith("/slots/"):
@@ -6472,6 +6570,7 @@ def main() -> int:
     except ValueError as e:
         print(f'[strata] {e}: set a key, or leave --api-key / STRATA_API_KEY / "api_key" out', file=sys.stderr)
         return 2
+    svc.api_key_store = APIKeyStore(svc.api_key)
     if not svc.api_key and "api_key" in cfg:             # #569: written, but empty: the server has none (a warning, not a stop)
         print("[strata] the api_key in the config is empty: this server has no API key (anyone who can reach it can "
               "use it); set one, or leave api_key out", file=sys.stderr, flush=True)

@@ -93,6 +93,29 @@
         <!-- filled by app.js: Speed, GPU load, VRAM, GPU temp, Power, PCIe, CPU, Disk read -->
       </div>
 
+      <div class="st-card key-usage-card">
+        <div class="req-head usage-head">
+          <div><span class="card-title">API key usage</span><p class="muted small usage-subtitle">Cached input and output tokens by key. Numbers and chart use the same time range.</p></div>
+          <div class="usage-ranges" id="usage-ranges" role="group" aria-label="API usage time range">
+            <button class="st-btn st-btn--secondary" type="button" data-usage-range="1h" aria-pressed="false" title="Show the last hour">1h</button>
+            <button class="st-btn st-btn--secondary" type="button" data-usage-range="24h" aria-pressed="true" title="Show the last 24 hours">24h</button>
+            <button class="st-btn st-btn--secondary" type="button" data-usage-range="7d" aria-pressed="false" title="Show the last 7 days">7d</button>
+            <button class="st-btn st-btn--secondary" type="button" data-usage-range="30d" aria-pressed="false" title="Show the last 30 days">30d</button>
+          </div>
+        </div>
+        <div class="usage-chart-wrap">
+          <svg id="key-usage-chart" class="key-usage-chart" viewBox="0 0 960 280" role="img" aria-label="API key token usage chart"></svg>
+        </div>
+        <div class="usage-legend" id="key-usage-legend" aria-label="Show or hide API keys on the chart"></div>
+        <div class="table-wrap usage-table-wrap">
+          <table class="st-table">
+            <thead><tr><th>API key</th><th class="num">Cached tokens</th><th class="num">Output tokens</th><th class="num">Requests</th></tr></thead>
+            <tbody id="key-usage-body"><tr><td colspan="4" class="muted">Loading usage…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="muted small usage-message" id="key-usage-message" role="status">Usage is kept on this PC for 90 days.</p>
+      </div>
+
       <div class="monitor-row">
         <div class="st-card ctx-card">
           <span class="card-title">Context fill</span>
@@ -171,8 +194,22 @@
         </div>
         <div class="toggle-row"><span>Dark theme</span>
           <button class="st-toggle" id="dark-toggle" role="switch" aria-checked="false" aria-label="Dark theme"></button></div>
-        <p class="muted small">Chats, settings and the key are kept in this browser only.
+        <p class="muted small">The primary key is kept in this browser for your Strata session.
           <a href="https://github.com/Niko1221/Strata" target="_blank" rel="noopener noreferrer">Strata on GitHub</a></p>
+        <a class="st-btn st-btn--secondary decision-api-link" id="decision-api-link" href="http://10.0.0.18:4747/" target="_blank" rel="noopener noreferrer"
+           title="Open the Strata Decisions API instructions on this machine">Decisions API instructions</a>
+      </div>
+      <div class="st-card api-keys-card" id="api-keys-card">
+        <div class="req-head"><span class="card-title">API keys</span><span class="muted small" id="api-keys-state" role="status">Checking…</span></div>
+        <p class="muted small">Create separate keys for apps and devices. Extra keys can call Strata’s API, but only the primary key can manage keys or change settings. Keys are stored in a private file on this PC; anyone with the primary key can reveal, copy, or revoke them.</p>
+        <form class="api-key-form" id="api-key-form">
+          <label class="st-field" for="api-key-name"><span class="st-label">Name this key</span>
+            <input class="st-input" id="api-key-name" name="name" maxlength="64" required autocomplete="off" placeholder="For example, Desktop app">
+          </label>
+          <button class="st-btn st-btn--primary" id="api-key-create" type="submit">Create API key</button>
+        </form>
+        <p class="muted small api-key-form-message" id="api-key-form-message" role="status"></p>
+        <div class="api-key-list" id="api-key-list" aria-live="polite"></div>
       </div>
       <div class="st-card cfg-card" id="cfg-card" hidden>
         <div class="req-head"><span class="card-title">Model settings</span><span class="muted small" id="cfg-file"></span></div>

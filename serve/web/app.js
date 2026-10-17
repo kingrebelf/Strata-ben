@@ -78,8 +78,9 @@ function showTab(name) {
   for (const v of ["chat", "monitor", "about"]) $(`view-${v}`).hidden = v !== tab;
   if (location.hash.slice(1) !== tab) history.replaceState(null, "", tab === "chat" ? location.pathname : `#${tab}`);
   if (tab === "chat") $("input").focus();
-  if (tab === "monitor") loadMcp();
-  if (tab === "about") loadConfig();
+  if (tab === "monitor") { loadMcp(); loadKeyUsage(); startKeyUsageRefresh(); }
+  else stopKeyUsageRefresh();
+  if (tab === "about") { loadConfig(); loadApiKeys(); }
   if (lastMetrics) render(lastMetrics);
 }
 for (const b of document.querySelectorAll(".st-tab")) b.onclick = () => showTab(b.dataset.tab);
@@ -94,7 +95,10 @@ function headers(json = false) {
   return h;
 }
 $("api-key").value = store.get("apikey", "");
-$("api-key").onchange = () => { store.set("apikey", $("api-key").value.trim()); toast("success", "API key saved", "Kept in this browser only."); };
+$("api-key").onchange = () => {
+  store.set("apikey", $("api-key").value.trim()); toast("success", "API key saved", "Kept in this browser only.");
+  if (tab === "about") { loadConfig(); loadApiKeys(); }
+};
 
 let health = {model: "strata", images: false, max_context: 0};
 async function loadHealth() {
@@ -433,6 +437,235 @@ function renderMcp() {
       `</div>`;
   }).join("");
 }
+
+// ------------------------------------------------------------------ API key management
+let apiKeysLoading = false, apiKeysBusy = false;
+function keyDate(value) { return value ? new Date(value * 1000).toLocaleString() : "the current server session"; }
+function renderApiKeys(keys) {
+  const list = $("api-key-list");
+  list.replaceChildren();
+  if (!keys.length) {
+    const empty = document.createElement("p"); empty.className = "muted small";
+    empty.textContent = "No API keys are available."; list.appendChild(empty); return;
+  }
+  for (const key of keys) {
+    const item = document.createElement("article"); item.className = "api-key-item";
+    const head = document.createElement("div"); head.className = "api-key-item__head";
+    const name = document.createElement("strong"); name.textContent = key.label;
+    const status = document.createElement("span");
+    status.className = `st-badge${key.active ? " st-badge--generating" : " st-badge--error"}`;
+    status.textContent = key.primary ? "Primary" : key.active ? "Active" : "Revoked";
+    head.append(name, status); item.appendChild(head);
+    const secretRow = document.createElement("div"); secretRow.className = "api-key-secret-row";
+    const secret = document.createElement("input"); secret.className = "st-input api-key-value";
+    secret.type = "password"; secret.value = key.token || ""; secret.readOnly = true;
+    secret.autocomplete = "off"; secret.spellcheck = false;
+    secret.setAttribute("aria-label", `${key.label} API key`);
+    secret.placeholder = key.active ? "Key unavailable" : "Revoked";
+    const reveal = document.createElement("button");
+    reveal.className = "st-btn st-btn--secondary"; reveal.type = "button"; reveal.textContent = "Show";
+    reveal.disabled = !key.active || !key.token; reveal.title = `Show or hide the ${key.label} API key`;
+    reveal.setAttribute("aria-label", `Show ${key.label} API key`); reveal.setAttribute("aria-pressed", "false");
+    reveal.addEventListener("click", () => {
+      const shown = secret.type === "password"; secret.type = shown ? "text" : "password";
+      reveal.textContent = shown ? "Hide" : "Show"; reveal.setAttribute("aria-pressed", String(shown));
+      reveal.setAttribute("aria-label", `${shown ? "Hide" : "Show"} ${key.label} API key`);
+    });
+    const copy = document.createElement("button");
+    copy.className = "st-btn st-btn--secondary"; copy.type = "button"; copy.textContent = "Copy";
+    copy.disabled = !key.active || !key.token; copy.title = `Copy the ${key.label} API key`;
+    copy.setAttribute("aria-label", `Copy ${key.label} API key`);
+    copy.addEventListener("click", () => copyText(key.token, null));
+    secretRow.append(secret, reveal, copy); item.appendChild(secretRow);
+    const details = document.createElement("div"); details.className = "muted small api-key-item__details";
+    details.textContent = key.primary ? "Configured in Strata’s server settings" :
+      `${key.active ? "Created" : "Revoked"} ${keyDate(key.active ? key.created_at : key.revoked_at || key.created_at)} · ends ${key.last_four || "—"}`;
+    item.appendChild(details);
+    if (!key.primary && key.active) {
+      const actions = document.createElement("div"); actions.className = "api-key-item__actions";
+      const revoke = document.createElement("button"); revoke.className = "st-btn st-btn--danger";
+      revoke.type = "button"; revoke.textContent = "Revoke key"; revoke.disabled = apiKeysBusy;
+      revoke.title = `Stop ${key.label} from using this Strata server`;
+      revoke.setAttribute("aria-label", `Revoke ${key.label} API key`);
+      revoke.addEventListener("click", () => revokeApiKey(key));
+      actions.appendChild(revoke); item.appendChild(actions);
+    }
+    list.appendChild(item);
+  }
+}
+async function loadApiKeys() {
+  if (apiKeysLoading) return;
+  apiKeysLoading = true; $("api-keys-state").textContent = "Loading…";
+  try {
+    const r = await fetch("api-keys", {headers: headers()}); const body = await r.json();
+    if (!r.ok) throw new Error((body.error || {}).message || "Could not load API keys.");
+    const keys = Array.isArray(body.keys) ? body.keys : [];
+    renderApiKeys(keys); $("api-keys-state").textContent = `${keys.filter((key) => key.active).length} active`;
+    $("api-key-form-message").textContent = ""; $("api-key-create").disabled = apiKeysBusy;
+  } catch (e) {
+    $("api-keys-state").textContent = "Unavailable";
+    $("api-key-form-message").textContent = String(e.message || e); $("api-key-create").disabled = true;
+  } finally { apiKeysLoading = false; }
+}
+$("api-key-form").addEventListener("submit", async (event) => {
+  event.preventDefault(); if (apiKeysBusy) return;
+  const name = $("api-key-name").value.trim(); if (!name) { $("api-key-name").focus(); return; }
+  apiKeysBusy = true; $("api-key-create").disabled = true;
+  $("api-key-form-message").textContent = "Saving this key on the Strata PC…";
+  try {
+    const r = await fetch("api-keys", {method: "POST", headers: headers(true), body: JSON.stringify({name})});
+    const body = await r.json(); if (!r.ok) throw new Error((body.error || {}).message || "Could not create this API key.");
+    $("api-key-name").value = "";
+    toast("success", "API key created", "It is hidden by default. Use Show or Copy whenever you need it.");
+    await loadApiKeys(); $("api-key-name").focus();
+  } catch (e) {
+    $("api-key-form-message").textContent = String(e.message || e); $("api-keys-state").textContent = "Not saved";
+  } finally {
+    apiKeysBusy = false; if ($("api-keys-state").textContent !== "Unavailable") $("api-key-create").disabled = false;
+  }
+});
+async function revokeApiKey(key) {
+  if (!window.confirm(`Revoke “${key.label}”? Apps using this key will stop working. You can create a replacement later.`)) return;
+  apiKeysBusy = true; $("api-key-create").disabled = true;
+  $("api-key-form-message").textContent = `Revoking ${key.label}…`;
+  try {
+    const r = await fetch("api-keys/revoke", {method: "POST", headers: headers(true), body: JSON.stringify({id: key.id})});
+    const body = await r.json(); if (!r.ok) throw new Error((body.error || {}).message || "Could not revoke this API key.");
+    toast("success", "API key revoked", `${key.label} can no longer use Strata.`); await loadApiKeys();
+  } catch (e) { $("api-key-form-message").textContent = String(e.message || e); }
+  finally {
+    apiKeysBusy = false; if ($("api-keys-state").textContent !== "Unavailable") $("api-key-create").disabled = false;
+  }
+}
+try { $("decision-api-link").href = `http://${location.hostname}:4747/`; } catch (e) { /* keep the LAN default */ }
+
+// ------------------------------------------------------------------ API key usage chart
+const USAGE_RANGES = ["1h", "24h", "7d", "30d"];
+const USAGE_COLORS = ["#10b981", "#3b82f6", "#f59e0b", "#a78bfa", "#ef5b65", "#06b6d4", "#f472b6", "#84cc16"];
+let keyUsageRange = store.get("keyUsageRange", "24h");
+if (!USAGE_RANGES.includes(keyUsageRange)) keyUsageRange = "24h";
+let keyUsageData = null, keyUsageLoading = false, keyUsageQueued = false, keyUsageTimer = null;
+let keyUsageRequest = 0;
+const hiddenUsageKeys = new Set();
+const usageColor = (index) => USAGE_COLORS[index % USAGE_COLORS.length];
+function svgElement(name, attrs = {}, label = null) {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, String(value));
+  if (label != null) el.textContent = label;
+  return el;
+}
+function chartMax(value) {
+  if (!(value > 0)) return 1;
+  const base = Math.pow(10, Math.floor(Math.log10(value))), ratio = value / base;
+  return (ratio <= 1 ? 1 : ratio <= 2 ? 2 : ratio <= 5 ? 5 : 10) * base;
+}
+function usageDate(value, range) {
+  const date = new Date(value * 1000);
+  return date.toLocaleString([], range === "1h" || range === "24h"
+    ? {hour: "numeric", minute: "2-digit"} : {month: "short", day: "numeric", hour: "numeric"});
+}
+function renderKeyUsageChart(data) {
+  const svg = $("key-usage-chart"); svg.replaceChildren();
+  const left = 58, right = 944, top = 20, bottom = 224, plotWidth = right - left, plotHeight = bottom - top;
+  const keys = data.keys || [];
+  const visible = keys.map((key, index) => ({key, index})).filter(({key}) => !hiddenUsageKeys.has(key.id));
+  const maxValue = chartMax(Math.max(0, ...visible.flatMap(({key}) =>
+    (key.series || []).map((point) => (point.cached_tokens || 0) + (point.output_tokens || 0)))));
+  for (let tick = 0; tick <= 4; tick++) {
+    const y = bottom - plotHeight * tick / 4;
+    svg.appendChild(svgElement("line", {x1: left, y1: y, x2: right, y2: y, class: "usage-grid"}));
+    svg.appendChild(svgElement("text", {x: left - 10, y: y + 4, class: "usage-axis-label", "text-anchor": "end"}, fmt(maxValue * tick / 4)));
+  }
+  svg.appendChild(svgElement("line", {x1: left, y1: bottom, x2: right, y2: bottom, class: "usage-axis"}));
+  const pointCount = Math.max(1, ...keys.map((key) => (key.series || []).length));
+  for (const index of [0, Math.floor((pointCount - 1) / 2), pointCount - 1]) {
+    const x = left + plotWidth * index / Math.max(1, pointCount - 1);
+    const anchor = index === 0 ? "start" : index === pointCount - 1 ? "end" : "middle";
+    svg.appendChild(svgElement("text", {x, y: bottom + 24, class: "usage-axis-label", "text-anchor": anchor},
+      usageDate(data.since + index * data.bucket_seconds, data.range)));
+  }
+  visible.forEach(({key, index}) => {
+    const points = key.series || []; if (!points.length) return;
+    const path = points.map((point, i) => {
+      const x = left + plotWidth * i / Math.max(1, points.length - 1);
+      const tokens = (point.cached_tokens || 0) + (point.output_tokens || 0);
+      const y = bottom - plotHeight * tokens / maxValue;
+      return `${i ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`;
+    }).join("");
+    svg.appendChild(svgElement("path", {d: path, class: "usage-line", stroke: usageColor(index)}));
+    points.forEach((point, i) => {
+      const cached = point.cached_tokens || 0, output = point.output_tokens || 0;
+      if (!cached && !output) return;
+      const x = left + plotWidth * i / Math.max(1, points.length - 1);
+      const y = bottom - plotHeight * (cached + output) / maxValue;
+      const dot = svgElement("circle", {cx: x, cy: y, r: 3.1, class: "usage-point", fill: usageColor(index)});
+      dot.appendChild(svgElement("title", {}, `${key.label} · ${usageDate(point.time, data.range)} · Cached ${fmt(cached)} · Output ${fmt(output)}`));
+      svg.appendChild(dot);
+    });
+  });
+  svg.setAttribute("aria-label", `Cached plus output token use by API key, ${data.range} range`);
+  const legend = $("key-usage-legend"); legend.replaceChildren();
+  keys.forEach((key, index) => {
+    const button = document.createElement("button"); button.type = "button"; button.className = "usage-legend-item";
+    button.setAttribute("aria-pressed", String(!hiddenUsageKeys.has(key.id)));
+    button.title = `${hiddenUsageKeys.has(key.id) ? "Show" : "Hide"} ${key.label} on the chart`;
+    button.style.setProperty("--usage-color", usageColor(index));
+    const dot = document.createElement("span"); dot.className = "usage-legend-dot"; dot.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span"); text.textContent = key.label;
+    button.append(dot, text);
+    button.addEventListener("click", () => {
+      if (hiddenUsageKeys.has(key.id)) hiddenUsageKeys.delete(key.id); else hiddenUsageKeys.add(key.id);
+      renderKeyUsageChart(keyUsageData);
+    });
+    legend.appendChild(button);
+  });
+}
+function renderKeyUsage(data) {
+  keyUsageData = data;
+  for (const button of document.querySelectorAll("[data-usage-range]"))
+    button.setAttribute("aria-pressed", String(button.dataset.usageRange === data.range));
+  renderKeyUsageChart(data);
+  const keys = data.keys || [];
+  $("key-usage-body").innerHTML = keys.length ? keys.map((key, index) =>
+    `<tr><td><span class="usage-table-key"><i style="--usage-color:${usageColor(index)}"></i><span>${esc(key.label)}` +
+    `${key.active ? "" : " <span class=\"muted small\">revoked</span>"}</span></span></td>` +
+    `<td class="num">${fmt(key.cached_tokens)}</td><td class="num">${fmt(key.output_tokens)}</td>` +
+    `<td class="num">${fmt(key.requests)}</td></tr>`).join("") :
+    '<tr><td colspan="4" class="muted">No API keys to show.</td></tr>';
+  const requests = keys.reduce((total, key) => total + (key.requests || 0), 0);
+  $("key-usage-message").textContent = requests
+    ? `${fmt(requests)} requests in this range. The chart plots cached plus output tokens; history stays on this PC for 90 days.`
+    : "No API requests in this range. Usage history stays on this PC for 90 days.";
+}
+async function loadKeyUsage() {
+  if (tab !== "monitor") return;
+  if (keyUsageLoading) { keyUsageQueued = true; return; }
+  keyUsageLoading = true; keyUsageQueued = false;
+  const requestId = ++keyUsageRequest, range = keyUsageRange;
+  try {
+    const r = await fetch(`api-key-usage?range=${encodeURIComponent(range)}`, {headers: headers()});
+    const body = await r.json(); if (!r.ok) throw new Error((body.error || {}).message || "Could not load API key usage.");
+    if (requestId === keyUsageRequest && range === keyUsageRange) renderKeyUsage(body);
+  } catch (e) {
+    if (requestId === keyUsageRequest) {
+      $("key-usage-message").textContent = String(e.message || e);
+      if (!keyUsageData) $("key-usage-body").innerHTML = '<tr><td colspan="4" class="muted">Usage is unavailable.</td></tr>';
+    }
+  } finally {
+    keyUsageLoading = false;
+    if (keyUsageQueued && tab === "monitor") loadKeyUsage();
+  }
+}
+for (const button of document.querySelectorAll("[data-usage-range]")) button.addEventListener("click", () => {
+  keyUsageRange = button.dataset.usageRange; store.set("keyUsageRange", keyUsageRange);
+  for (const rangeButton of document.querySelectorAll("[data-usage-range]"))
+    rangeButton.setAttribute("aria-pressed", String(rangeButton === button));
+  $("key-usage-message").textContent = "Loading the selected time range…"; loadKeyUsage();
+});
+function startKeyUsageRefresh() {
+  if (!keyUsageTimer) keyUsageTimer = setInterval(() => { if (tab === "monitor") loadKeyUsage(); }, 15000);
+}
+function stopKeyUsageRefresh() { if (keyUsageTimer) { clearInterval(keyUsageTimer); keyUsageTimer = null; } }
 
 // ------------------------------------------------------------------ Model settings (GET / POST /config, #564)
 // A few documented keys of the run config (strata-<model>.json), for every client, from the next start on.  The
