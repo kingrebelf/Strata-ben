@@ -542,12 +542,14 @@ try { $("decision-api-link").href = `http://${location.hostname}:4747/`; } catch
 // ------------------------------------------------------------------ API key usage chart
 const USAGE_RANGES = ["1h", "24h", "7d", "30d"];
 const USAGE_COLORS = ["#10b981", "#3b82f6", "#f59e0b", "#a78bfa", "#ef5b65", "#06b6d4", "#f472b6", "#84cc16"];
+const GENERATOR_COLORS = {"generator:flux-image-api": "#a371f7", "generator:trellis-3d-api": "#2dd4bf"};
 let keyUsageRange = store.get("keyUsageRange", "24h");
 if (!USAGE_RANGES.includes(keyUsageRange)) keyUsageRange = "24h";
 let keyUsageData = null, keyUsageLoading = false, keyUsageQueued = false, keyUsageTimer = null;
 let keyUsageRequest = 0;
 const hiddenUsageKeys = new Set();
-const usageColor = (index) => USAGE_COLORS[index % USAGE_COLORS.length];
+const usageColor = (index, key) => key?.type === "generator"
+  ? (GENERATOR_COLORS[key.id] || "#f472b6") : USAGE_COLORS[index % USAGE_COLORS.length];
 function svgElement(name, attrs = {}, label = null) {
   const el = document.createElementNS("http://www.w3.org/2000/svg", name);
   for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, String(value));
@@ -566,16 +568,28 @@ function usageDate(value, range) {
 }
 function renderKeyUsageChart(data) {
   const svg = $("key-usage-chart"); svg.replaceChildren();
-  const left = 58, right = 944, top = 20, bottom = 224, plotWidth = right - left, plotHeight = bottom - top;
   const keys = data.keys || [];
   const visible = keys.map((key, index) => ({key, index})).filter(({key}) => !hiddenUsageKeys.has(key.id));
-  const maxValue = chartMax(Math.max(0, ...visible.flatMap(({key}) =>
+  const tokenSources = visible.filter(({key}) => key.type !== "generator");
+  const generatorSources = visible.filter(({key}) => key.type === "generator");
+  const hasGeneratedItems = generatorSources.some(({key}) =>
+    (key.series || []).some((point) => (point.images || 0) + (point.assets_3d || 0) > 0));
+  const left = 58, right = hasGeneratedItems ? 900 : 944, top = 20, bottom = 224;
+  const plotWidth = right - left, plotHeight = bottom - top;
+  const maxValue = chartMax(Math.max(0, ...tokenSources.flatMap(({key}) =>
     (key.series || []).map((point) => (point.cached_tokens || 0) + (point.output_tokens || 0)))));
+  const maxItems = chartMax(Math.max(0, ...generatorSources.flatMap(({key}) =>
+    (key.series || []).map((point) => (point.images || 0) + (point.assets_3d || 0)))));
   for (let tick = 0; tick <= 4; tick++) {
     const y = bottom - plotHeight * tick / 4;
     svg.appendChild(svgElement("line", {x1: left, y1: y, x2: right, y2: y, class: "usage-grid"}));
     svg.appendChild(svgElement("text", {x: left - 10, y: y + 4, class: "usage-axis-label", "text-anchor": "end"}, fmt(maxValue * tick / 4)));
+    if (hasGeneratedItems) {
+      const itemTickLabel = fmt(maxItems * tick / 4, 1);
+      svg.appendChild(svgElement("text", {x: right + 10, y: y + 4, class: "usage-axis-label usage-axis-label--right", "text-anchor": "start"}, itemTickLabel));
+    }
   }
+  if (hasGeneratedItems) svg.appendChild(svgElement("text", {x: 950, y: 12, class: "usage-axis-label usage-axis-title", "text-anchor": "end"}, "Items"));
   svg.appendChild(svgElement("line", {x1: left, y1: bottom, x2: right, y2: bottom, class: "usage-axis"}));
   const pointCount = Math.max(1, ...keys.map((key) => (key.series || []).length));
   for (const index of [0, Math.floor((pointCount - 1) / 2), pointCount - 1]) {
@@ -586,30 +600,46 @@ function renderKeyUsageChart(data) {
   }
   visible.forEach(({key, index}) => {
     const points = key.series || []; if (!points.length) return;
+    const generator = key.type === "generator";
+    const values = points.map((point) => generator
+      ? (point.images || 0) + (point.assets_3d || 0)
+      : (point.cached_tokens || 0) + (point.output_tokens || 0));
+    if (generator && !values.some((value) => value > 0)) return;
+    const scale = generator ? maxItems : maxValue;
     const path = points.map((point, i) => {
       const x = left + plotWidth * i / Math.max(1, points.length - 1);
-      const tokens = (point.cached_tokens || 0) + (point.output_tokens || 0);
-      const y = bottom - plotHeight * tokens / maxValue;
+      const y = bottom - plotHeight * values[i] / scale;
       return `${i ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`;
     }).join("");
-    svg.appendChild(svgElement("path", {d: path, class: "usage-line", stroke: usageColor(index)}));
+    svg.appendChild(svgElement("path", {d: path,
+      class: generator ? "usage-line usage-line--generator" : "usage-line", stroke: usageColor(index, key)}));
     points.forEach((point, i) => {
       const cached = point.cached_tokens || 0, output = point.output_tokens || 0;
-      if (!cached && !output) return;
+      const images = point.images || 0, assets = point.assets_3d || 0;
+      if (generator ? (!images && !assets) : (!cached && !output)) return;
       const x = left + plotWidth * i / Math.max(1, points.length - 1);
-      const y = bottom - plotHeight * (cached + output) / maxValue;
-      const dot = svgElement("circle", {cx: x, cy: y, r: 3.1, class: "usage-point", fill: usageColor(index)});
-      dot.appendChild(svgElement("title", {}, `${key.label} · ${usageDate(point.time, data.range)} · Cached ${fmt(cached)} · Output ${fmt(output)}`));
+      const value = generator ? images + assets : cached + output;
+      const y = bottom - plotHeight * value / scale;
+      const color = usageColor(index, key);
+      const dot = svgElement("circle", {cx: x, cy: y, r: 3.1, class: "usage-point", fill: color});
+      const details = generator
+        ? `${images ? `${fmt(images)} images` : ""}${images && assets ? " · " : ""}${assets ? `${fmt(assets)} 3D assets` : ""} · ${fmt(point.generation_seconds || 0, 1)}s generation${point.failed_requests ? ` · ${fmt(point.failed_requests)} failed` : ""}`
+        : `Cached ${fmt(cached)} · Output ${fmt(output)}`;
+      dot.appendChild(svgElement("title", {}, `${key.label} · ${usageDate(point.time, data.range)} · ${details}`));
       svg.appendChild(dot);
     });
   });
-  svg.setAttribute("aria-label", `Cached plus output token use by API key, ${data.range} range`);
+  svg.setAttribute("aria-label", hasGeneratedItems
+    ? `Cached and output token use by API key, plus image and 3D asset counts, ${data.range} range`
+    : `Cached plus output token use by API key, ${data.range} range`);
   const legend = $("key-usage-legend"); legend.replaceChildren();
+  legend.setAttribute("aria-label", generatorSources.length
+    ? "Show or hide usage sources on the chart" : "Show or hide API keys on the chart");
   keys.forEach((key, index) => {
     const button = document.createElement("button"); button.type = "button"; button.className = "usage-legend-item";
     button.setAttribute("aria-pressed", String(!hiddenUsageKeys.has(key.id)));
     button.title = `${hiddenUsageKeys.has(key.id) ? "Show" : "Hide"} ${key.label} on the chart`;
-    button.style.setProperty("--usage-color", usageColor(index));
+    button.style.setProperty("--usage-color", usageColor(index, key));
     const dot = document.createElement("span"); dot.className = "usage-legend-dot"; dot.setAttribute("aria-hidden", "true");
     const text = document.createElement("span"); text.textContent = key.label;
     button.append(dot, text);
@@ -626,16 +656,41 @@ function renderKeyUsage(data) {
     button.setAttribute("aria-pressed", String(button.dataset.usageRange === data.range));
   renderKeyUsageChart(data);
   const keys = data.keys || [];
-  $("key-usage-body").innerHTML = keys.length ? keys.map((key, index) =>
-    `<tr><td><span class="usage-table-key"><i style="--usage-color:${usageColor(index)}"></i><span>${esc(key.label)}` +
-    `${key.active ? "" : " <span class=\"muted small\">revoked</span>"}</span></span></td>` +
-    `<td class="num">${fmt(key.cached_tokens)}</td><td class="num">${fmt(key.output_tokens)}</td>` +
-    `<td class="num">${fmt(key.requests)}</td></tr>`).join("") :
-    '<tr><td colspan="4" class="muted">No API keys to show.</td></tr>';
+  const hasGenerators = keys.some((key) => key.type === "generator");
+  $("key-usage-title").textContent = hasGenerators ? "API key and generator usage" : "API key usage";
+  $("key-usage-subtitle").textContent = hasGenerators
+    ? "Tokens, images, and 3D assets share the selected time range; each uses its own unit."
+    : "Cached input and output tokens by key. Numbers and chart use the same time range.";
+  $("key-usage-head").innerHTML = hasGenerators
+    ? "<tr><th>Source</th><th class=\"num\">Cached tokens</th><th class=\"num\">Output tokens</th><th class=\"num\">Images</th><th class=\"num\">3D assets</th><th class=\"num\">Generation time</th><th class=\"num\">Failed</th><th class=\"num\">Requests</th></tr>"
+    : "<tr><th>API key</th><th class=\"num\">Cached tokens</th><th class=\"num\">Output tokens</th><th class=\"num\">Requests</th></tr>";
+  $("key-usage-body").innerHTML = keys.length ? keys.map((key, index) => {
+    const color = usageColor(index, key);
+    const cell = `<td><span class="usage-table-key"><i style="--usage-color:${color}"></i><span>${esc(key.label)}` +
+      `${key.type === "generator" ? " <span class=\"muted small\">generator</span>" : key.active ? "" : " <span class=\"muted small\">revoked</span>"}</span></span></td>`;
+    if (!hasGenerators) return `<tr>${cell}<td class="num">${fmt(key.cached_tokens)}</td>` +
+      `<td class="num">${fmt(key.output_tokens)}</td><td class="num">${fmt(key.requests)}</td></tr>`;
+    return key.type === "generator"
+      ? `<tr>${cell}<td class="num">—</td><td class="num">—</td><td class="num">${fmt(key.images)}</td>` +
+        `<td class="num">${fmt(key.assets_3d)}</td><td class="num">${fmt(key.generation_seconds || 0, 1)}s</td>` +
+        `<td class="num">${fmt(key.failed_requests)}</td><td class="num">${fmt(key.requests)}</td></tr>`
+      : `<tr>${cell}<td class="num">${fmt(key.cached_tokens)}</td><td class="num">${fmt(key.output_tokens)}</td>` +
+        `<td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td>` +
+        `<td class="num">${fmt(key.requests)}</td></tr>`;
+  }).join("") : `<tr><td colspan="${hasGenerators ? 8 : 4}" class="muted">${hasGenerators ? "No API keys or generators to show." : "No API keys to show."}</td></tr>`;
   const requests = keys.reduce((total, key) => total + (key.requests || 0), 0);
-  $("key-usage-message").textContent = requests
-    ? `${fmt(requests)} requests in this range. The chart plots cached plus output tokens; history stays on this PC for 90 days.`
-    : "No API requests in this range. Usage history stays on this PC for 90 days.";
+  if (hasGenerators) {
+    const images = keys.reduce((total, key) => total + (key.images || 0), 0);
+    const assets = keys.reduce((total, key) => total + (key.assets_3d || 0), 0);
+    const generated = [images ? `${fmt(images)} images` : "", assets ? `${fmt(assets)} 3D assets` : ""].filter(Boolean).join(" · ");
+    $("key-usage-message").textContent = requests
+      ? `${fmt(requests)} requests in this range${generated ? ` · ${generated}` : ""}. Tokens use the left axis; generated items use the right axis. History stays on this PC for 90 days.`
+      : "No API requests or generated assets in this range. Usage history stays on this PC for 90 days.";
+  } else {
+    $("key-usage-message").textContent = requests
+      ? `${fmt(requests)} requests in this range. The chart plots cached plus output tokens; history stays on this PC for 90 days.`
+      : "No API requests in this range. Usage history stays on this PC for 90 days.";
+  }
 }
 async function loadKeyUsage() {
   if (tab !== "monitor") return;
@@ -1314,3 +1369,4 @@ if (startQuestion) history.replaceState(null, "", location.pathname + location.h
 loadHealth().then(loadMcp).then(() => { if (startQuestion) { $("input").value = startQuestion; send(); } });
 showTab(location.hash.slice(1) || "chat");
 poll();
+

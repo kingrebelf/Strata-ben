@@ -201,6 +201,8 @@ main { flex: 1; min-height: 0; display: flex; }
 .usage-grid { stroke: var(--st-line-soft); stroke-width: 1; }
 .usage-axis { stroke: var(--st-line); stroke-width: 1; }
 .usage-line { fill: none; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.usage-line--generator { stroke-dasharray: 5 4; }
+.usage-axis-title { font-weight: 600; }
 .usage-point { stroke: var(--st-surface); stroke-width: 1.5; }
 .usage-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; }
 .usage-legend-item { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; padding: 2px 4px; border: 0;
@@ -236,3 +238,4 @@ main { flex: 1; min-height: 0; display: flex; }
   .api-key-secret-row { grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; }
   .api-key-secret-row .st-btn { height: 38px; padding: 0 12px; }
 }
+

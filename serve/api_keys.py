@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import os
 import secrets
 import threading
@@ -12,6 +13,11 @@ from pathlib import Path
 
 class APIKeyStore:
     """Local API key management and prompt-free token usage history."""
+
+    GENERATOR_SOURCES = {
+        "flux-image-api": "FLUX.2 Klein 4B image API",
+        "trellis-3d-api": "TRELLIS image-to-3D API",
+    }
 
     RANGES = {
         "1h": (3600, 60),
@@ -32,6 +38,8 @@ class APIKeyStore:
         state_dir = state_home / "strata"
         self.keys_path = Path(keys_path) if keys_path else state_dir / "api-keys.json"
         self.usage_path = Path(usage_path) if usage_path else state_dir / "api-usage.jsonl"
+        generator_usage_path = os.environ.get("STRATA_GENERATOR_USAGE_FILE")
+        self.generator_usage_path = Path(generator_usage_path).expanduser() if generator_usage_path else None
         self.clock = clock or time.time
         self.lock = threading.RLock()
         self.keys = []
@@ -286,5 +294,77 @@ class APIKeyStore:
                                 "cached_tokens": values[0], "output_tokens": values[1]}
                                for i, values in enumerate(item[3])],
                 })
+            if self.generator_usage_path is not None:
+                generator_groups = {}
+
+                def new_generator_group():
+                    return {
+                        "requests": 0, "images": 0, "assets_3d": 0,
+                        "generation_seconds": 0.0, "failed_requests": 0,
+                        "series": [{"images": 0, "assets_3d": 0, "generation_seconds": 0.0,
+                                    "failed_requests": 0} for _ in range(count)],
+                    }
+
+                for source_id, label in self.GENERATOR_SOURCES.items():
+                    generator_id = f"generator:{source_id}"
+                    generator_groups[generator_id] = new_generator_group()
+                    by_id[generator_id] = {"id": generator_id, "label": label, "active": True,
+                                        "primary": False, "created_at": None, "last_four": "",
+                                        "type": "generator"}
+
+                try:
+                    with self.generator_usage_path.open("r", encoding="utf-8") as stream:
+                        for line in stream:
+                            try:
+                                event = json.loads(line)
+                                if event.get("source_type") != "generator":
+                                    continue
+                                source_id = event.get("source_id")
+                                at = float(event.get("time"))
+                                if (not isinstance(source_id, str) or not source_id or not math.isfinite(at) or
+                                        at < start or at >= end + interval):
+                                    continue
+                                images = max(0, int(event.get("image_count", 0) or 0))
+                                assets_3d = max(0, int(event.get("assets_3d", 0) or 0))
+                                seconds = max(0.0, float(event.get("generation_seconds", 0) or 0))
+                                failures = max(0, int(event.get("failed_requests", 0) or 0))
+                                requests = max(0, int(event.get("requests", 1) or 0))
+                                if not math.isfinite(seconds):
+                                    continue
+                                bucket = min(count - 1, max(0, int((at - start) // interval)))
+                                generator_id = f"generator:{source_id}"
+                                label = str(event.get("source_label") or
+                                            self.GENERATOR_SOURCES.get(source_id, "Generator API"))[:64]
+                                if generator_id not in generator_groups:
+                                    generator_groups[generator_id] = new_generator_group()
+                                    by_id[generator_id] = {"id": generator_id, "label": label, "active": True,
+                                                        "primary": False, "created_at": None, "last_four": "",
+                                                        "type": "generator"}
+                                item = generator_groups[generator_id]
+                                item["requests"] += requests
+                                for field, value in (("images", images), ("assets_3d", assets_3d),
+                                                     ("failed_requests", failures)):
+                                    item[field] += value
+                                    item["series"][bucket][field] += value
+                                item["generation_seconds"] += seconds
+                                item["series"][bucket]["generation_seconds"] += seconds
+                            except (ValueError, TypeError, AttributeError, OverflowError):
+                                continue
+                except OSError:
+                    pass
+
+                for source_id, item in generator_groups.items():
+                    row = by_id[source_id]
+                    keys.append({
+                        **row,
+                        "requests": item["requests"],
+                        "images": item["images"],
+                        "assets_3d": item["assets_3d"],
+                        "generation_seconds": round(item["generation_seconds"], 1),
+                        "failed_requests": item["failed_requests"],
+                        "series": [{"time": start + i * interval, **values}
+                                   for i, values in enumerate(item["series"])],
+                    })
             return {"range": range_name, "since": start, "until": end + interval,
                     "bucket_seconds": interval, "keys": keys}
+
