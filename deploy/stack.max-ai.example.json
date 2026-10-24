@@ -1,0 +1,38 @@
+{
+  "name": "Max AI four-V100 model services",
+  "gpu_roles_file": "gpu-roles.max-ai.example.json",
+  "strata_gpu_indices": [0],
+  "services": [
+    {
+      "unit": "ai3d-flux2.service",
+      "role": "FLUX.2 Klein image generation",
+      "gpu_indices": [2]
+    },
+    {
+      "unit": "ai3d-trellis2-worker.service",
+      "role": "TRELLIS.2 image-to-3D worker",
+      "gpu_indices": [1]
+    },
+    {
+      "unit": "ai3d-studio.service",
+      "role": "TRELLIS Studio API and UI",
+      "gpu_indices": [1]
+    },
+    {
+      "unit": "ai3d-sound.service",
+      "role": "MOSS-SoundEffect v2.0",
+      "gpu_indices": [3]
+    },
+    {
+      "unit": "ai3d-sound-sa3.service",
+      "role": "Stable Audio 3 Small SFX",
+      "gpu_indices": [3]
+    },
+    {
+      "unit": "ai3d-output-share.service",
+      "role": "Generated asset sharing service",
+      "gpu_indices": []
+    }
+  ],
+  "tunnel_units": []
+}
