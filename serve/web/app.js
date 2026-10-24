@@ -78,8 +78,8 @@ function showTab(name) {
   for (const v of ["chat", "monitor", "about"]) $(`view-${v}`).hidden = v !== tab;
   if (location.hash.slice(1) !== tab) history.replaceState(null, "", tab === "chat" ? location.pathname : `#${tab}`);
   if (tab === "chat") $("input").focus();
-  if (tab === "monitor") { loadMcp(); loadKeyUsage(); startKeyUsageRefresh(); }
-  else stopKeyUsageRefresh();
+  if (tab === "monitor") { loadMcp(); loadKeyUsage(); startKeyUsageRefresh(); startGpuStatusRefresh(); }
+  else { stopKeyUsageRefresh(); stopGpuStatusRefresh(); }
   if (tab === "about") { loadConfig(); loadApiKeys(); }
   if (lastMetrics) render(lastMetrics);
 }
@@ -542,7 +542,9 @@ try { $("decision-api-link").href = `http://${location.hostname}:4747/`; } catch
 // ------------------------------------------------------------------ API key usage chart
 const USAGE_RANGES = ["1h", "24h", "7d", "30d"];
 const USAGE_COLORS = ["#10b981", "#3b82f6", "#f59e0b", "#a78bfa", "#ef5b65", "#06b6d4", "#f472b6", "#84cc16"];
-const GENERATOR_COLORS = {"generator:flux-image-api": "#a371f7", "generator:trellis-3d-api": "#2dd4bf"};
+const GENERATOR_COLORS = {"generator:flux-image-api": "#a371f7", "generator:trellis-3d-api": "#2dd4bf",
+  "generator:sound-api:moss-soundeffect-v2-0": "#06b6d4",
+  "generator:sound-api:stable-audio-3-small-sfx": "#f472b6"};
 let keyUsageRange = store.get("keyUsageRange", "24h");
 if (!USAGE_RANGES.includes(keyUsageRange)) keyUsageRange = "24h";
 let keyUsageData = null, keyUsageLoading = false, keyUsageQueued = false, keyUsageTimer = null;
@@ -573,13 +575,13 @@ function renderKeyUsageChart(data) {
   const tokenSources = visible.filter(({key}) => key.type !== "generator");
   const generatorSources = visible.filter(({key}) => key.type === "generator");
   const hasGeneratedItems = generatorSources.some(({key}) =>
-    (key.series || []).some((point) => (point.images || 0) + (point.assets_3d || 0) > 0));
+    (key.series || []).some((point) => (point.images || 0) + (point.assets_3d || 0) + (point.sounds || 0) > 0));
   const left = 58, right = hasGeneratedItems ? 900 : 944, top = 20, bottom = 224;
   const plotWidth = right - left, plotHeight = bottom - top;
   const maxValue = chartMax(Math.max(0, ...tokenSources.flatMap(({key}) =>
     (key.series || []).map((point) => (point.cached_tokens || 0) + (point.output_tokens || 0)))));
   const maxItems = chartMax(Math.max(0, ...generatorSources.flatMap(({key}) =>
-    (key.series || []).map((point) => (point.images || 0) + (point.assets_3d || 0)))));
+    (key.series || []).map((point) => (point.images || 0) + (point.assets_3d || 0) + (point.sounds || 0)))));
   for (let tick = 0; tick <= 4; tick++) {
     const y = bottom - plotHeight * tick / 4;
     svg.appendChild(svgElement("line", {x1: left, y1: y, x2: right, y2: y, class: "usage-grid"}));
@@ -602,7 +604,7 @@ function renderKeyUsageChart(data) {
     const points = key.series || []; if (!points.length) return;
     const generator = key.type === "generator";
     const values = points.map((point) => generator
-      ? (point.images || 0) + (point.assets_3d || 0)
+      ? (point.images || 0) + (point.assets_3d || 0) + (point.sounds || 0)
       : (point.cached_tokens || 0) + (point.output_tokens || 0));
     if (generator && !values.some((value) => value > 0)) return;
     const scale = generator ? maxItems : maxValue;
@@ -615,22 +617,22 @@ function renderKeyUsageChart(data) {
       class: generator ? "usage-line usage-line--generator" : "usage-line", stroke: usageColor(index, key)}));
     points.forEach((point, i) => {
       const cached = point.cached_tokens || 0, output = point.output_tokens || 0;
-      const images = point.images || 0, assets = point.assets_3d || 0;
-      if (generator ? (!images && !assets) : (!cached && !output)) return;
+      const images = point.images || 0, assets = point.assets_3d || 0, sounds = point.sounds || 0;
+      if (generator ? (!images && !assets && !sounds) : (!cached && !output)) return;
       const x = left + plotWidth * i / Math.max(1, points.length - 1);
-      const value = generator ? images + assets : cached + output;
+      const value = generator ? images + assets + sounds : cached + output;
       const y = bottom - plotHeight * value / scale;
       const color = usageColor(index, key);
       const dot = svgElement("circle", {cx: x, cy: y, r: 3.1, class: "usage-point", fill: color});
       const details = generator
-        ? `${images ? `${fmt(images)} images` : ""}${images && assets ? " · " : ""}${assets ? `${fmt(assets)} 3D assets` : ""} · ${fmt(point.generation_seconds || 0, 1)}s generation${point.failed_requests ? ` · ${fmt(point.failed_requests)} failed` : ""}`
+        ? `${images ? `${fmt(images)} images` : ""}${images && assets ? " · " : ""}${assets ? `${fmt(assets)} 3D assets` : ""}${(images || assets) && sounds ? " · " : ""}${sounds ? `${fmt(sounds)} sounds` : ""} · ${fmt(point.generation_seconds || 0, 1)}s generation${point.failed_requests ? ` · ${fmt(point.failed_requests)} failed` : ""}`
         : `Cached ${fmt(cached)} · Output ${fmt(output)}`;
       dot.appendChild(svgElement("title", {}, `${key.label} · ${usageDate(point.time, data.range)} · ${details}`));
       svg.appendChild(dot);
     });
   });
   svg.setAttribute("aria-label", hasGeneratedItems
-    ? `Cached and output token use by API key, plus image and 3D asset counts, ${data.range} range`
+    ? `Cached and output token use by API key, plus image, 3D asset, and sound counts, ${data.range} range`
     : `Cached plus output token use by API key, ${data.range} range`);
   const legend = $("key-usage-legend"); legend.replaceChildren();
   legend.setAttribute("aria-label", generatorSources.length
@@ -656,13 +658,20 @@ function renderKeyUsage(data) {
     button.setAttribute("aria-pressed", String(button.dataset.usageRange === data.range));
   renderKeyUsageChart(data);
   const keys = data.keys || [];
+  const lifetime = data.lifetime || {};
+  $("lifetime-token-total").textContent = Number.isFinite(Number(lifetime.total_tokens))
+    ? fmt(Number(lifetime.total_tokens)) : "Unavailable";
+  const trackingSince = Number(lifetime.full_input_tracking_since);
+  $("lifetime-token-note").textContent = trackingSince
+    ? `Prompt + output tokens. Full input tracking began ${new Date(trackingSince * 1000).toLocaleDateString()}; older records can only backfill cached inputs.`
+    : "Prompt + output tokens recorded on this server.";
   const hasGenerators = keys.some((key) => key.type === "generator");
   $("key-usage-title").textContent = hasGenerators ? "API key and generator usage" : "API key usage";
   $("key-usage-subtitle").textContent = hasGenerators
-    ? "Tokens, images, and 3D assets share the selected time range; each uses its own unit."
+    ? "Tokens, images, 3D assets, and sounds share the selected time range; each uses its own unit."
     : "Cached input and output tokens by key. Numbers and chart use the same time range.";
   $("key-usage-head").innerHTML = hasGenerators
-    ? "<tr><th>Source</th><th class=\"num\">Cached tokens</th><th class=\"num\">Output tokens</th><th class=\"num\">Images</th><th class=\"num\">3D assets</th><th class=\"num\">Generation time</th><th class=\"num\">Failed</th><th class=\"num\">Requests</th></tr>"
+    ? "<tr><th>Source</th><th class=\"num\">Cached tokens</th><th class=\"num\">Output tokens</th><th class=\"num\">Images</th><th class=\"num\">3D assets</th><th class=\"num\">Sounds</th><th class=\"num\">Generation time</th><th class=\"num\">Failed</th><th class=\"num\">Requests</th></tr>"
     : "<tr><th>API key</th><th class=\"num\">Cached tokens</th><th class=\"num\">Output tokens</th><th class=\"num\">Requests</th></tr>";
   $("key-usage-body").innerHTML = keys.length ? keys.map((key, index) => {
     const color = usageColor(index, key);
@@ -672,17 +681,19 @@ function renderKeyUsage(data) {
       `<td class="num">${fmt(key.output_tokens)}</td><td class="num">${fmt(key.requests)}</td></tr>`;
     return key.type === "generator"
       ? `<tr>${cell}<td class="num">—</td><td class="num">—</td><td class="num">${fmt(key.images)}</td>` +
-        `<td class="num">${fmt(key.assets_3d)}</td><td class="num">${fmt(key.generation_seconds || 0, 1)}s</td>` +
+        `<td class="num">${fmt(key.assets_3d)}</td><td class="num">${fmt(key.sounds || 0)}</td><td class="num">${fmt(key.generation_seconds || 0, 1)}s</td>` +
         `<td class="num">${fmt(key.failed_requests)}</td><td class="num">${fmt(key.requests)}</td></tr>`
       : `<tr>${cell}<td class="num">${fmt(key.cached_tokens)}</td><td class="num">${fmt(key.output_tokens)}</td>` +
-        `<td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td>` +
+        `<td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td>` +
         `<td class="num">${fmt(key.requests)}</td></tr>`;
-  }).join("") : `<tr><td colspan="${hasGenerators ? 8 : 4}" class="muted">${hasGenerators ? "No API keys or generators to show." : "No API keys to show."}</td></tr>`;
+  }).join("") : `<tr><td colspan="${hasGenerators ? 9 : 4}" class="muted">${hasGenerators ? "No API keys or generators to show." : "No API keys to show."}</td></tr>`;
   const requests = keys.reduce((total, key) => total + (key.requests || 0), 0);
   if (hasGenerators) {
     const images = keys.reduce((total, key) => total + (key.images || 0), 0);
     const assets = keys.reduce((total, key) => total + (key.assets_3d || 0), 0);
-    const generated = [images ? `${fmt(images)} images` : "", assets ? `${fmt(assets)} 3D assets` : ""].filter(Boolean).join(" · ");
+    const sounds = keys.reduce((total, key) => total + (key.sounds || 0), 0);
+    const generated = [images ? `${fmt(images)} images` : "", assets ? `${fmt(assets)} 3D assets` : "",
+      sounds ? `${fmt(sounds)} sounds` : ""].filter(Boolean).join(" · ");
     $("key-usage-message").textContent = requests
       ? `${fmt(requests)} requests in this range${generated ? ` · ${generated}` : ""}. Tokens use the left axis; generated items use the right axis. History stays on this PC for 90 days.`
       : "No API requests or generated assets in this range. Usage history stays on this PC for 90 days.";
@@ -721,6 +732,47 @@ function startKeyUsageRefresh() {
   if (!keyUsageTimer) keyUsageTimer = setInterval(() => { if (tab === "monitor") loadKeyUsage(); }, 15000);
 }
 function stopKeyUsageRefresh() { if (keyUsageTimer) { clearInterval(keyUsageTimer); keyUsageTimer = null; } }
+
+// Optional all-GPU service cards. The endpoint is enabled only when an operator supplies a local role profile.
+let gpuStatusTimer = null, gpuStatusLoading = false;
+function renderGpuStatus(data) {
+  const gpus = Array.isArray(data.gpus) ? data.gpus : [];
+  $("gpu-service-grid").innerHTML = gpus.map((gpu) => {
+    const memory = Number.isFinite(gpu.vram_used_mib) && Number.isFinite(gpu.vram_total_mib) && gpu.vram_total_mib > 0;
+    const pct = memory ? Math.max(0, Math.min(100, 100 * gpu.vram_used_mib / gpu.vram_total_mib)) : 0;
+    const power = gpu.power_w == null ? "–" : `${fmt(gpu.power_w, 1)} W`;
+    const limit = gpu.power_limit_w == null ? "" : ` / limit ${fmt(gpu.power_limit_w, 0)} W`;
+    const utilization = gpu.utilization_pct == null ? "–" : `${fmt(gpu.utilization_pct)}%`;
+    return `<article class="gpu-service-tile"><div class="gpu-service-tile__head"><div><strong>GPU ${fmt(gpu.index)}</strong>` +
+      `<span class="muted small gpu-service-name">${esc(gpu.name)}</span></div><span class="st-badge">${esc(gpu.role || "GPU")}</span></div>` +
+      `<p class="gpu-service-label">${esc(gpu.service || "Unassigned")}</p>` +
+      `<div class="bar-row"><span>GPU load</span><strong>${utilization}</strong></div>` +
+      `<div class="bar-row"><span>VRAM</span><strong>${memory ? `${fmt(gpu.vram_used_mib / 1024, 1)} / ${fmt(gpu.vram_total_mib / 1024, 1)} GiB (${fmt(pct)}%)` : "–"}</strong></div>` +
+      `<div class="st-progress"><div class="st-progress__bar" style="width:${pct.toFixed(1)}%"></div></div>` +
+      `<div class="bar-row"><span>Power</span><strong>${power}${limit}</strong></div></article>`;
+  }).join("");
+  $("gpu-service-state").textContent = gpus.length ? `${gpus.length} GPUs · updated ${timeStr(data.updated_at * 1000)}` : "No GPU telemetry.";
+  $("gpu-service-card").hidden = !gpus.length;
+}
+async function loadGpuStatus() {
+  if (tab !== "monitor" || gpuStatusLoading) return;
+  gpuStatusLoading = true;
+  try {
+    const r = await fetch("gpu-status", {headers: headers()});
+    const body = await r.json();
+    if (r.status === 404) { $("gpu-service-card").hidden = true; return; }
+    if (!r.ok) throw new Error((body.error || {}).message || "GPU telemetry is unavailable.");
+    renderGpuStatus(body);
+  } catch (e) {
+    if (!$("gpu-service-grid").children.length) $("gpu-service-card").hidden = true;
+    $("gpu-service-state").textContent = String(e.message || e);
+  } finally { gpuStatusLoading = false; }
+}
+function startGpuStatusRefresh() {
+  loadGpuStatus();
+  if (!gpuStatusTimer) gpuStatusTimer = setInterval(loadGpuStatus, 5000);
+}
+function stopGpuStatusRefresh() { if (gpuStatusTimer) { clearInterval(gpuStatusTimer); gpuStatusTimer = null; } }
 
 // ------------------------------------------------------------------ Model settings (GET / POST /config, #564)
 // A few documented keys of the run config (strata-<model>.json), for every client, from the next start on.  The

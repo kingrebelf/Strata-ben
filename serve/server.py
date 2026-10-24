@@ -4184,7 +4184,7 @@ class Service:
                                 if last.get("offloaded") is not None and routed else None
                             seen = prompt_tokens_seen(len(ids), last)   # #471: < len(ids) when cancelled mid-read
                             usage_event = (getattr(self.request_trace, "api_key_id", None),
-                                           last.get("reused") or 0, n, time.time())
+                                           last.get("reused") or 0, n, time.time(), seen)
                             self.history.append({
                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
                                 if loaded else None,
@@ -5019,6 +5019,59 @@ def make_handler(svc: Service):
             except ValueError as e:
                 self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
 
+        def _gpu_status(self):
+            roles_path = os.environ.get("STRATA_GPU_ROLES_FILE")
+            if not roles_path:
+                self._json(404, {"error": {"message": "GPU service labels are not configured."}})
+                return
+            try:
+                roles = json.loads(Path(roles_path).expanduser().read_text(encoding="utf-8"))
+                if not isinstance(roles, dict):
+                    raise ValueError("GPU roles must be a JSON object keyed by GPU index.")
+            except (OSError, ValueError, TypeError) as e:
+                self._json(503, {"error": {"message": f"GPU service labels are unavailable: {e}"}})
+                return
+            command = ["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,power.limit",
+                       "--format=csv,noheader,nounits"]
+            try:
+                result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=True)
+            except (OSError, subprocess.SubprocessError) as e:
+                self._json(503, {"error": {"message": f"GPU telemetry is unavailable: {e}"}})
+                return
+
+            def number(value):
+                value = value.strip()
+                if value in ("", "[N/A]", "N/A"):
+                    return None
+                try:
+                    parsed = float(value)
+                    return int(parsed) if parsed.is_integer() else round(parsed, 2)
+                except ValueError:
+                    return None
+
+            gpus = []
+            for line in result.stdout.splitlines():
+                columns = [part.strip() for part in line.split(",")]
+                if len(columns) != 7:
+                    continue
+                try:
+                    index = int(columns[0])
+                except ValueError:
+                    continue
+                label = roles.get(str(index), {})
+                if not isinstance(label, dict):
+                    label = {}
+                role = str(label.get("role") or "GPU")[:48]
+                service = str(label.get("service") or "")[:120]
+                gpus.append({"index": index, "name": columns[1], "role": role, "service": service,
+                             "utilization_pct": number(columns[2]), "vram_used_mib": number(columns[3]),
+                             "vram_total_mib": number(columns[4]), "power_w": number(columns[5]),
+                             "power_limit_w": number(columns[6])})
+            if not gpus:
+                self._json(503, {"error": {"message": "nvidia-smi returned no GPU telemetry."}})
+                return
+            self._json(200, {"gpus": gpus, "updated_at": time.time()})
+
         def _api_key_create(self):
             body = self._body()
             if not self._own_page("API keys can be created"):
@@ -5066,6 +5119,10 @@ def make_handler(svc: Service):
             if path == "/api-key-usage":
                 if self._authorized(admin=True, require_primary=True):
                     self._api_key_usage()
+                return
+            if path == "/gpu-status":
+                if self._authorized(admin=True, require_primary=True):
+                    self._gpu_status()
                 return
             if path.startswith("/fonts/"):
                 # the web app's font (Outfit, OFL: serve/web/fonts); the page falls back to the system font

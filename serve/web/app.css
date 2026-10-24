@@ -190,6 +190,20 @@ main { flex: 1; min-height: 0; display: flex; }
 }
 /* ---------------------------------------------------------------- API key usage and management */
 .key-usage-card, .api-keys-card { display: flex; flex-direction: column; gap: var(--st-s-3); min-width: 0; }
+.gpu-service-card { display: flex; flex-direction: column; gap: var(--st-s-3); min-width: 0; }
+.gpu-service-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); gap: var(--st-s-3); }
+.gpu-service-tile { min-width: 0; padding: var(--st-s-4); border: 1px solid var(--st-line-soft); border-radius: var(--st-r-md);
+  background: var(--st-surface-2); font-variant-numeric: tabular-nums; }
+.gpu-service-tile__head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--st-s-3); }
+.gpu-service-tile__head > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.gpu-service-name { overflow-wrap: anywhere; }
+.gpu-service-label { min-height: 2.4em; margin: var(--st-s-3) 0; font-size: var(--st-fs-sm); font-weight: var(--st-fw-semibold);
+  overflow-wrap: anywhere; }
+.usage-lifetime { display: flex; align-items: center; justify-content: space-between; gap: var(--st-s-4); padding: var(--st-s-3) var(--st-s-4);
+  border: 1px solid var(--st-line-soft); border-radius: var(--st-r-md); background: var(--st-surface-2); }
+.usage-lifetime > div { display: flex; flex-direction: column; gap: 3px; flex: none; }
+.usage-lifetime strong { font-size: var(--st-fs-xl); font-variant-numeric: tabular-nums; }
+.usage-lifetime > span { text-align: right; }
 .usage-head { align-items: flex-start; }
 .usage-subtitle { margin: 4px 0 0; }
 .usage-ranges { display: flex; gap: var(--st-s-1); flex: none; }
@@ -229,6 +243,8 @@ main { flex: 1; min-height: 0; display: flex; }
 
 @media (max-width: 640px) {
   .usage-head { display: grid; }
+  .usage-lifetime { align-items: flex-start; flex-direction: column; gap: var(--st-s-2); }
+  .usage-lifetime > span { text-align: left; }
   .usage-ranges { width: 100%; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .usage-ranges .st-btn { padding: 0 8px; }
   .usage-chart-wrap { overflow-x: auto; }

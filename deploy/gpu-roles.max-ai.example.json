@@ -1,0 +1,18 @@
+{
+  "0": {
+    "role": "LLM",
+    "service": "Strata"
+  },
+  "1": {
+    "role": "3D gen",
+    "service": "TRELLIS"
+  },
+  "2": {
+    "role": "Image gen",
+    "service": "FLUX.2 Klein"
+  },
+  "3": {
+    "role": "LLM + sound",
+    "service": "OpenJev + MOSS-SoundEffect v2.0 + Stable Audio 3 Small SFX"
+  }
+}
