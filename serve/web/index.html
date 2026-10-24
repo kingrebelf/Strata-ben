@@ -93,9 +93,16 @@
         <!-- filled by app.js: Speed, GPU load, VRAM, GPU temp, Power, PCIe, CPU, Disk read -->
       </div>
 
+      <div class="st-card gpu-service-card" id="gpu-service-card" hidden>
+        <div class="req-head"><div><span class="card-title">GPU usage by service</span>
+          <p class="muted small usage-subtitle">Utilization, VRAM, and board power refresh every five seconds.</p></div>
+          <span class="muted small" id="gpu-service-state" role="status">Loading GPU telemetry…</span></div>
+        <div class="gpu-service-grid" id="gpu-service-grid"></div>
+      </div>
+
       <div class="st-card key-usage-card">
         <div class="req-head usage-head">
-          <div><span class="card-title">API key usage</span><p class="muted small usage-subtitle">Cached input and output tokens by key. Numbers and chart use the same time range.</p></div>
+          <div><span class="card-title" id="key-usage-title">API key usage</span><p class="muted small usage-subtitle" id="key-usage-subtitle">Cached input and output tokens by key. Numbers and chart use the same time range.</p></div>
           <div class="usage-ranges" id="usage-ranges" role="group" aria-label="API usage time range">
             <button class="st-btn st-btn--secondary" type="button" data-usage-range="1h" aria-pressed="false" title="Show the last hour">1h</button>
             <button class="st-btn st-btn--secondary" type="button" data-usage-range="24h" aria-pressed="true" title="Show the last 24 hours">24h</button>
@@ -103,13 +110,17 @@
             <button class="st-btn st-btn--secondary" type="button" data-usage-range="30d" aria-pressed="false" title="Show the last 30 days">30d</button>
           </div>
         </div>
+        <div class="usage-lifetime" aria-live="polite">
+          <div><span class="muted small">Lifetime LLM tokens</span><strong id="lifetime-token-total">–</strong></div>
+          <span class="muted small" id="lifetime-token-note">Prompt + output tokens recorded on this server.</span>
+        </div>
         <div class="usage-chart-wrap">
           <svg id="key-usage-chart" class="key-usage-chart" viewBox="0 0 960 280" role="img" aria-label="API key token usage chart"></svg>
         </div>
         <div class="usage-legend" id="key-usage-legend" aria-label="Show or hide API keys on the chart"></div>
         <div class="table-wrap usage-table-wrap">
           <table class="st-table">
-            <thead><tr><th>API key</th><th class="num">Cached tokens</th><th class="num">Output tokens</th><th class="num">Requests</th></tr></thead>
+            <thead id="key-usage-head"><tr><th>API key</th><th class="num">Cached tokens</th><th class="num">Output tokens</th><th class="num">Requests</th></tr></thead>
             <tbody id="key-usage-body"><tr><td colspan="4" class="muted">Loading usage…</td></tr></tbody>
           </table>
         </div>
@@ -279,3 +290,4 @@
 <script src="web/app.js"></script>
 </body>
 </html>
+
