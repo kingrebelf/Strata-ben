@@ -4,6 +4,16 @@
   "strata_gpu_indices": [0],
   "services": [
     {
+      "unit": "strata-stack.service",
+      "role": "Strata API, model switch, and configured tunnel",
+      "gpu_indices": [0]
+    },
+    {
+      "unit": "strata-cors-front.service",
+      "role": "Strata browser CORS relay",
+      "gpu_indices": []
+    },
+    {
       "unit": "ai3d-flux2.service",
       "role": "FLUX.2 Klein image generation",
       "gpu_indices": [2]
@@ -17,6 +27,11 @@
       "unit": "ai3d-studio.service",
       "role": "TRELLIS Studio API and UI",
       "gpu_indices": [1]
+    },
+    {
+      "unit": "ai3d-cutout.service",
+      "role": "BiRefNet background removal",
+      "gpu_indices": [2]
     },
     {
       "unit": "ai3d-sound.service",

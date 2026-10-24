@@ -1,0 +1,17 @@
+[Unit]
+Description=Strata API, model switch, and configured tunnel
+StartLimitIntervalSec=0
+ConditionPathExists=%h/.config/strata/boot.env
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=20min
+EnvironmentFile=%h/.config/strata/boot.env
+ExecStart=/usr/bin/sudo -n -u ${STRATA_SERVICE_USER} ${STRATA_START_SCRIPT}
+ExecStop=/usr/bin/sudo -n -u ${STRATA_SERVICE_USER} ${STRATA_STOP_SCRIPT}
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=default.target

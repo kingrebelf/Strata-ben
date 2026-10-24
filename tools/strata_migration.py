@@ -131,22 +131,24 @@ def stack(args) -> int:
     if args.action == "stop":
         units.reverse()
     failed = False
-    if args.action in ("start", "stop"):
+    if args.action in ("start", "stop", "enable"):
         for unit in units:
-            result = systemctl(args.action, unit)
+            operation = "enable" if args.action == "enable" else args.action
+            result = systemctl(operation, unit)
             if result.returncode:
                 failed = True
                 detail = (result.stderr or result.stdout).strip()
-                print(f"{unit}: {args.action} failed{': ' + detail if detail else ''}")
+                print(f"{unit}: {operation} failed{': ' + detail if detail else ''}")
             else:
-                print(f"{unit}: {args.action} requested")
+                print(f"{unit}: {operation} requested")
         if failed:
             return 1
+    state_check = "is-enabled" if args.action == "enable" else "is-active"
     for unit in units:
-        result = systemctl("is-active", unit)
+        result = systemctl(state_check, unit)
         state = result.stdout.strip() or "inactive"
         print(f"{unit}: {state}")
-        if args.action == "status" and result.returncode:
+        if args.action in ("enable", "status") and result.returncode:
             failed = True
     return 1 if failed else 0
 
@@ -232,8 +234,8 @@ def export_bundle(args) -> int:
               "then recreate tunnels with new credentials.\n\n"
               "Run `python tools/strata_migration.py preflight --profile stack-profile.json --experimental-sm60` "
               "when using the experimental CUDA 12.x path; omit that flag to check the standard build. Run "
-              "`python tools/strata_migration.py start --profile "
-              "stack-profile.json` after installing the listed systemd user units.\n")
+              "`python tools/strata_migration.py enable --profile stack-profile.json` to enable boot startup, then "
+              "`python tools/strata_migration.py start --profile stack-profile.json` to start the services now.\n")
     (output / "README.md").write_text(readme, encoding="utf-8")
     if lifetime_payload is not None:
         private = output / "private"
@@ -257,7 +259,7 @@ def main() -> int:
     check.add_argument("--experimental-sm60", action="store_true",
                        help="check the experimental CUDA 12.x floor of compute capability 6.0")
     check.set_defaults(func=preflight)
-    for action in ("start", "stop", "status"):
+    for action in ("enable", "start", "stop", "status"):
         cmd = sub.add_parser(action, help=f"{action} or inspect profile services with systemd --user")
         cmd.add_argument("--profile", default=os.environ.get("STRATA_STACK_PROFILE", str(DEFAULT_PROFILE)),
                          help="service profile JSON (default: Max AI example profile)")

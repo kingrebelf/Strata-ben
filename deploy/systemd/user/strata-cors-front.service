@@ -1,0 +1,14 @@
+[Unit]
+Description=Strata browser CORS relay
+StartLimitIntervalSec=0
+ConditionPathExists=%h/.config/strata/boot.env
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/strata/boot.env
+ExecStart=/usr/bin/python3 ${STRATA_CORS_SCRIPT} ${STRATA_CORS_TARGET} ${STRATA_CORS_PORT} ${STRATA_CORS_BIND}
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

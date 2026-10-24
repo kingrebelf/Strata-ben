@@ -34,15 +34,20 @@ That writes only aggregate token and request counts plus the counter's recovery 
 
 ## Install and start the services
 
-The `start`, `stop`, and `status` commands operate on systemd user units named in the selected profile:
+The `enable`, `start`, `stop`, and `status` commands operate on systemd user units named in the selected profile. `enable` makes them start with the user's systemd manager at boot; `start` starts them now:
 
 ```sh
 python tools/strata_migration.py status --profile /path/to/stack-profile.json
+python tools/strata_migration.py enable --profile /path/to/stack-profile.json
 python tools/strata_migration.py start --profile /path/to/stack-profile.json
 python tools/strata_migration.py stop --profile /path/to/stack-profile.json
 ```
 
-They do not install dependencies, download model weights, create systemd units, or change firewall and tunnel settings. Install each model service from its own source, review its license, restore the local model cache, write and enable its unit on the destination, and then add that unit to the private profile. The checked-in Max AI example lists the FLUX, TRELLIS, MOSS, Stable Audio, and generated-file sharing units observed on the current host; add your Strata server unit and tunnel unit if you want the same start command to manage them. The tunnel list starts empty because tunnel unit names vary by host.
+The checked-in Max AI example includes the Strata startup wrapper, browser relay, FLUX, TRELLIS, background removal, MOSS, Stable Audio, and generated-file sharing units observed on the current host. On that host, OpenJev runs as system-level units and is already enabled separately; the migration helper's service list operates on user units. The Cloudflare tunnel is launched with Strata by the current server configuration, so it does not have a separate user unit in this profile. If a destination uses a separate tunnel unit, add its name to `tunnel_units`.
+
+The example unit files in `deploy/systemd/user/` need a private environment file at `~/.config/strata/boot.env`. Edit the paths and service account for the destination, install the units into `~/.config/systemd/user/`, run `systemctl --user daemon-reload`, then use the `enable` command above. On Linux, enable lingering for the service account (`sudo loginctl enable-linger USER`) so its user units start before anyone logs in. OpenJev's system units need their own system-level `systemctl enable` setup.
+
+These steps do not install dependencies, download model weights, or change firewall and tunnel credentials. Install each model service from its own source, review its license, and restore the local model cache before enabling the units. The GPU display profile is labels only; set actual GPU allocations in each service's configuration.
 
 The `STRATA_GPU_ROLES_FILE` profile is display-only. It controls the GPU service cards on the Monitor page; it does not assign GPUs to model processes. Set GPU allocation in each service's own configuration. Edit the example GPU map for the target, then set the environment variable in Strata's local service configuration.
 
