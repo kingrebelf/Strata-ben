@@ -7,10 +7,10 @@ This guide prepares a Strata host and its local model services for a move or a s
 From a Strata checkout, inspect the destination GPUs before copying model files or enabling services:
 
 ```sh
-python tools/strata_migration.py preflight --profile deploy/stack.max-ai.example.json
+python tools/strata_migration.py preflight --profile deploy/stack.max-ai.example.json --experimental-sm60
 ```
 
-The standard Strata build requires NVIDIA compute capability 7.5 or newer. Some older NVIDIA cards can use the documented experimental CUDA 12.x build from compute capability 6.0. A Tesla M40 is compute capability 5.2, below both floors, so it cannot run this Strata engine. The tool reports the capability of every visible NVIDIA GPU and checks the profile's assigned indices. The image, 3D, and sound services also need separate compatibility checks for their own model runtimes.
+The four-V100 example uses the documented experimental CUDA 12.x path, whose floor is compute capability 6.0. Omit `--experimental-sm60` to check the standard build, which requires compute capability 7.5 or newer. A Tesla M40 is compute capability 5.2, below both floors, so it cannot run this Strata engine. The tool reports the capability of every visible NVIDIA GPU and checks the profile's assigned indices. The image, 3D, and sound services also need separate compatibility checks for their own model runtimes.
 
 NVIDIA's [legacy GPU capability table](https://developer.nvidia.com/cuda-gpus/legacy) lists Tesla M40 at 5.2. Strata's [older GPU guide](OLDER_GPUS.md) describes the experimental 6.0 floor.
 

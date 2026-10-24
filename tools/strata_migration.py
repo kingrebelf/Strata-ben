@@ -230,8 +230,9 @@ def export_bundle(args) -> int:
               "models, generated files, prompts, API keys, logs, or tunnel credentials. Review `stack-profile.json`, "
               "update unit names and GPU indices for the destination, install model services and licensed weights, "
               "then recreate tunnels with new credentials.\n\n"
-              "Run `python tools/strata_migration.py preflight --profile stack-profile.json` in the destination "
-              "Strata checkout before moving workloads. Run `python tools/strata_migration.py start --profile "
+              "Run `python tools/strata_migration.py preflight --profile stack-profile.json --experimental-sm60` "
+              "when using the experimental CUDA 12.x path; omit that flag to check the standard build. Run "
+              "`python tools/strata_migration.py start --profile "
               "stack-profile.json` after installing the listed systemd user units.\n")
     (output / "README.md").write_text(readme, encoding="utf-8")
     if lifetime_payload is not None:
