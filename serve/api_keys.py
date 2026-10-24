@@ -39,7 +39,7 @@ class APIKeyStore:
         state_dir = state_home / "strata"
         self.keys_path = Path(keys_path) if keys_path else state_dir / "api-keys.json"
         self.usage_path = Path(usage_path) if usage_path else state_dir / "api-usage.jsonl"
-        lifetime_path = lifetime_path or os.environ.get("STRATA_LIFETIME_USAGE_FILE")
+        lifetime_path = lifetime_path or (None if usage_path else os.environ.get("STRATA_LIFETIME_USAGE_FILE"))
         self.lifetime_path = (Path(lifetime_path).expanduser() if lifetime_path else
                               self.usage_path.with_name("api-usage-lifetime.json") if usage_path else
                               state_dir / "api-usage-lifetime.json")
@@ -121,7 +121,7 @@ class APIKeyStore:
                             if isinstance(event_id, str) and event_id:
                                 row["event_id"] = event_id
                             all_rows.append(row)
-                    except (ValueError, TypeError, AttributeError):
+                    except (ValueError, TypeError, AttributeError, OverflowError):
                         continue
         except OSError:
             pass
