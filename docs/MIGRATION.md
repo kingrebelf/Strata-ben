@@ -47,6 +47,8 @@ The checked-in Max AI example includes the Strata startup wrapper, browser relay
 
 The example unit files in `deploy/systemd/user/` need a private environment file at `~/.config/strata/boot.env`. Edit the paths and service account for the destination, install the units into `~/.config/systemd/user/`, run `systemctl --user daemon-reload`, then use the `enable` command above. On Linux, enable lingering for the service account (`sudo loginctl enable-linger USER`) so its user units start before anyone logs in. OpenJev's system units need their own system-level `systemctl enable` setup.
 
+For the Max AI TRELLIS.2 worker, `deploy/systemd/user/ai3d-trellis2-worker.service.d/allocator.conf` opts PyTorch into expandable CUDA allocator segments. It can reduce fragmentation during PBR baking; it does not increase a GPU's physical memory.
+
 These steps do not install dependencies, download model weights, or change firewall and tunnel credentials. Install each model service from its own source, review its license, and restore the local model cache before enabling the units. The GPU display profile is labels only; set actual GPU allocations in each service's configuration.
 
 The `STRATA_GPU_ROLES_FILE` profile is display-only. It controls the GPU service cards on the Monitor page; it does not assign GPUs to model processes. Set GPU allocation in each service's own configuration. Edit the example GPU map for the target, then set the environment variable in Strata's local service configuration.
